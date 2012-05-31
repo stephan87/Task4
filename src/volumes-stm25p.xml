@@ -1,0 +1,4 @@
+<volume_table>
+  <volume name="CONFIGLOG" size="65536"/>
+  <volume name="SENSORLOG" size="131072"/>  
+</volume_table>

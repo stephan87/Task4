@@ -1,4 +1,5 @@
 #include "TestSerial.h"
+#include "StorageVolumes.h"
 
 configuration TestSerialAppC {}
 implementation {
@@ -10,17 +11,20 @@ implementation {
   components new TimerMilliC() as SensorTimer;
   components new QueueC(message_t*, 10) as RadioQueueC;
   components new PoolC(message_t, 10) as RadioMsgPoolC;
-  components new QueueC(uint8_t, 10) as RadioTypeQueueC;
+  components new QueueC(QueueInfo, 10) as RadioTypeQueueC;
   components new QueueC(message_t*, 5) as SerialQueueC;
   components new QueueC(uint8_t, 5) as SerialTypeQueueC;
   components new PoolC(message_t, 5) as SerialMsgPoolC;
-//  components CC2420ActiveMessageC;
   components RandomC;
+  components ActiveMessageAddressC;
+  components new ConfigStorageC(VOLUME_CONFIGTEST);
+  components new LogStorageC(VOLUME_LOGTEST, TRUE);
   
 #ifndef SIMULATION
   components LocalTimeSecondC;
   components new SensirionSht11C() as SensorHumidityTemperature;
   components new HamamatsuS1087ParC() as SensorLight;
+  components CC2420ActiveMessageC;
 #else
   components new DemoSensorC() as TossimDemoSensor;
 #endif
@@ -39,24 +43,32 @@ implementation {
   App.RadioPacket 	-> AMRadio;
   App.RadioAMPacket -> AMRadio;
   
-  App.BeaconTimer -> BeaconTimer;
-  App.AckTimer -> AckTimer;
-  App.SensorTimer -> SensorTimer;
-  App.Leds 	-> LedsC;
-//  App.CC2420Packet -> CC2420ActiveMessageC;
-  App.Random -> RandomC;
-  App.RadioQueue -> RadioQueueC;
+  App.BeaconTimer 	-> BeaconTimer;
+  App.AckTimer 		-> AckTimer;
+  App.SensorTimer 	-> SensorTimer;
+  App.Leds 			-> LedsC;
+  App.Random 		-> RandomC;
+  App.RadioQueue 	-> RadioQueueC;
   App.RadioTypeQueue -> RadioTypeQueueC;
-  App.RadioMsgPool -> RadioMsgPoolC;
-  App.SerialQueue -> SerialQueueC;
+  App.RadioMsgPool 	-> RadioMsgPoolC;
+  App.SerialQueue 	-> SerialQueueC;
   App.SerialTypeQueue -> SerialTypeQueueC;
   App.SerialMsgPool -> SerialMsgPoolC;
+  App.PacketAcknowledgements -> AMRadio.PacketAcknowledgements;
+  App.ActiveMessageAddress -> ActiveMessageAddressC;
+  
+  App.Config     -> ConfigStorageC.ConfigStorage;
+  App.Mount      -> ConfigStorageC.Mount;
+  
+  App.LogRead -> LogStorageC;
+  App.LogWrite -> LogStorageC;
   
 #ifndef SIMULATION
   App.LocalTime -> LocalTimeSecondC;
   App.SensorHumidity -> SensorHumidityTemperature.Humidity;
   App.SensorTemperature -> SensorHumidityTemperature.Temperature;
   App.SensorLight -> SensorLight;
+  App.CC2420Packet -> CC2420ActiveMessageC;
 #else
   App.SensorHumidity -> TossimDemoSensor;
 #endif

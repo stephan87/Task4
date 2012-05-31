@@ -5,7 +5,7 @@ import time
 from TOSSIM import *
 #from TestSerialMsg import *
 
-nodes = 8
+nodes = 4
 t = Tossim([])
 m = t.mac()
 r = t.radio()
@@ -16,6 +16,7 @@ t.addChannel("TestSerialC", sys.stdout);
 #t.addChannel("TestSerialCSensor", sys.stdout);
 #t.addChannel("Routing",sys.stdout);
 t.addChannel("Pool",sys.stdout);
+t.addChannel("Acked",sys.stdout);
 t.addChannel("TestSerialCSerial",sys.stdout);
 
 f = open("topo.txt", "r")
@@ -43,8 +44,8 @@ for i in range(0, nodes):
 for i in range (0, 1000000):
 	t.runNextEvent();
 	time.sleep(0.01);
-	if i == 1200:
-		t.getNode(1).turnOff();
+	#if i == 1200:
+	#	t.getNode(1).turnOff();
 	sf.process();
 
 
