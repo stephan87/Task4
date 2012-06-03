@@ -21,6 +21,7 @@ module TestSerialC @safe()
 		interface Timer<TMilli> as BeaconTimer;
 		interface Timer<TMilli> as AckTimer;
 		interface Timer<TMilli> as SensorTimer;
+		interface Timer<TMilli> as ReadLogTimer;
 		
 		interface LogRead;
     	interface LogWrite;
@@ -116,9 +117,16 @@ implementation
 	
 	// other methods
   	bool isChild(uint16_t moteId);
+  	
+  	// storage
   	config_t conf;
-  	logentry_t m_entry;
-  	bool m_busy = FALSE;
+  	logentry_t logEntry;
+  	bool storageBusy = FALSE;		// should be set to true if writting starts
+  	
+  	
+  	
+  	
+  	
   	
   	/*
   	*	Method which is called after the Mote booted
@@ -130,10 +138,18 @@ implementation
     	call RadioControl.start();
     	call ActiveMessageAddress.setAddress(6,TOS_NODE_ID);
     	
+    	// init conf 
+    	conf.state = CONFIG_STATE_INIT;	
     	if (call Mount.mount() != SUCCESS)
     	{
+    	
 	      dbg("Storage","Storage mount failed\n");
+	      
 	    }
+	    
+	    
+	    
+	    
     	if(TOS_NODE_ID == 0)
     	{
     		call SerialControl.start();
@@ -147,24 +163,34 @@ implementation
     	initNeighborTable();
     	initSensors();
     	
-    	//if(message_t)
-    	{
-    		dbg("TestSerialC","message length: SensorMsg =%d\n",sizeof(SensorMsg));
-    		dbg("TestSerialC","message length: CommandMsg = %d\n",sizeof(CommandMsg));
-    		dbg("TestSerialC","message length: TableMsg = %d\n",sizeof(TableMsg));
-    		dbg("TestSerialC","message length: BeaconMsg = %d\n",sizeof(BeaconMsg));
-    		dbg("TestSerialC","message length: message_t = %d\n",sizeof(message_t));
-    	}
+    	dbg("TestSerialC","message length: SensorMsg =%d\n",sizeof(SensorMsg));
+    	dbg("TestSerialC","message length: CommandMsg = %d\n",sizeof(CommandMsg));
+    	dbg("TestSerialC","message length: TableMsg = %d\n",sizeof(TableMsg));
+    	dbg("TestSerialC","message length: BeaconMsg = %d\n",sizeof(BeaconMsg));
+    	dbg("TestSerialC","message length: message_t = %d\n",sizeof(message_t));
+    	
     	
     	call BeaconTimer.startPeriodic( AM_BEACONINTERVAL );
   	}
   	
+  	/*******************************************************************************************
+  	*
+  	*								Config
+  	*
+  	*******************************************************************************************/
+  	
+  	
+  	
+  	/*
+  	*	Checks if Config is valid and reads from Config.
+  	*/
   	event void Mount.mountDone(error_t error)
   	{
 	    if (error == SUCCESS)
 	    {
 	      	if (call Config.valid() == TRUE)
-	      	{
+	      	{	
+	      		// Load config
 	        	if (call Config.read(CONFIG_ADDR, &conf, sizeof(conf)) != SUCCESS)
 	        	{
 	          		dbg("Storage","Error: Config read failed\n");
@@ -188,67 +214,52 @@ implementation
 	      // Handle failure
 	    }
     }
-    event void LogRead.readDone(void* buf, storage_len_t len, error_t err) 
-    {
-    	if ( (len == sizeof(logentry_t)) && (buf == &m_entry) ) 
-    	{
-      		//call AMSend.send[call AMPacket.type(&m_entry.msg)](call AMPacket.destination(&m_entry.msg), &m_entry.msg, m_entry.len);
-    	}
-    	else 
-    	{
-	      	if (call LogWrite.erase() != SUCCESS) 
-	      	{
-				// Handle error.
-	      	}
-    	}
-  	}
-  	
-  	event void LogWrite.eraseDone(error_t err) 
-  	{
-		if (err == SUCCESS) 
-		{
-			m_busy = FALSE;
-		}
-		else 
-		{
-			// Handle error.
-		}
-	}
-  	
-  	event void LogRead.seekDone(error_t err) {
-  	}
-
-  	event void LogWrite.syncDone(error_t err) {
-  	}
+    
+    
+    /*
+    *	Sets state of mote by Config.
+    */
     event void Config.readDone(storage_addr_t addr, void* buf, storage_len_t len, error_t err) __attribute__((noinline)) 
     {
     	if (err == SUCCESS) 
     	{
       		memcpy(&conf, buf, len);
-      		if (conf.version == CONFIG_VERSION) 
+      		// note: conf is overwritten from storage
+      		if (conf.state == CONFIG_STATE_INIT) 
       		{
-        		conf.period = conf.period/2;
-				conf.period = conf.period > MAX_PERIOD ? MAX_PERIOD : conf.period;
-        		conf.period = conf.period < MIN_PERIOD ? MAX_PERIOD : conf.period;
+        		// start sensors and writing to log
+        		conf.state = CONFIG_STATE_WRITING;
+        		startSensorTimer();	
       		}
-      		else 
+      		else if (conf.state == CONFIG_STATE_WRITING) 
       		{
-        		// Version mismatch. Restore default.
-        		conf.version = CONFIG_VERSION;
-        		conf.period = DEFAULT_PERIOD;
+        		// start sensors
+        		startSensorTimer();	
+        		
       		}
+      		else if (conf.state == CONFIG_STATE_READING) 
+      		{
+      			//TODO: reading from log
+      			call ReadLogTimer.startOneShot(READLOG_INTERVAL);
+      		}
+      		else
+      		{
+      		// Version mismatch. Restore default.
       		call Config.write(CONFIG_ADDR, &conf, sizeof(conf));
+      		}
     	}
     	else 
     	{
       		// Handle failure.
     	}
   	}
-
+	
+	/*
+	*	Calls Config.commit() to ensure data was written.
+	*/
   	event void Config.writeDone(storage_addr_t addr, void *buf, storage_len_t len, error_t err) 
   	{
-    	// Verify addr and len
-
+    	// Verify write
     	if (err == SUCCESS) 
     	{
       		if (call Config.commit() != SUCCESS) 
@@ -261,15 +272,122 @@ implementation
       		// Handle failure
     	}
   	}
-
+	
+	/*
+	*	Checks if writing to Conf was successful.
+	*/
   	event void Config.commitDone(error_t err) 
   	{
-    	call Timer0.startPeriodic(conf.period);
+    	
     	if (err == SUCCESS) 
     	{
       		// Handle failure
     	}
   	}
+  	
+  	/*******************************************************************************************
+  	*
+  	*								Log
+  	*
+  	*******************************************************************************************/
+  	
+  	
+  	/*
+  	*	Enqueues reading and erases log if the logEntry isn't valid.
+  	*/
+    event void LogRead.readDone(void* buf, storage_len_t len, error_t err) 
+    {	
+    	SensorMsg currentSensorMsg;
+        int i;
+        
+    	if ( (len == sizeof(logentry_t)) && (buf == &logEntry) ) 
+    	{
+      		// build msg to send
+      		currentSensorMsg.sensor  	= logEntry.sensor;
+		    currentSensorMsg.version 	= logEntry.version;
+		    currentSensorMsg.sender   	= TOS_NODE_ID;
+    		currentSensorMsg.receiver 	= SERIAL_ADDR;
+    		
+	     	// fill the sensor readind data
+	  		for(i = 0; i < NREADINGS; i++)
+	  		{
+	  			currentSensorMsg.readings[i] = logEntry.readings[i];
+	  		}
+      			
+      		// send message
+		    if(TOS_NODE_ID == 0)
+		    {
+		    	serialSendSensorMsg(&currentSensorMsg);
+			}
+			else
+			{
+				radioSendSensorMsg(&currentSensorMsg);
+			}
+			
+			// finished reading
+			storageBusy = FALSE;
+			
+			// start next read from log	
+			if(conf.state == CONFIG_STATE_READING)
+      		{	
+      			call ReadLogTimer.startOneShot(READLOG_INTERVAL);
+      		}
+    	}
+    	else 
+    	{	
+    		// no valid entry -> erase
+    		storageBusy = TRUE;
+	      	if (call LogWrite.erase() != SUCCESS) 
+	      	{
+				// Handle error.
+	      	}
+    	}
+  	}
+  	
+  	/*
+  	*	Unfreezes log and starts writing to log:
+  	*/
+  	event void LogWrite.eraseDone(error_t err) 
+  	{	
+  		storageBusy = FALSE;
+		if (err == SUCCESS) 
+		{
+			
+			//TODO: start sensors
+		}
+		else 
+		{
+			// Handle error.
+		}
+	}
+  	
+  	/*
+  	*	Not in use.
+  	*/
+  	event void LogRead.seekDone(error_t err) {
+  	}
+	
+	/*
+  	*	Not in use.
+  	*/
+  	event void LogWrite.syncDone(error_t err) {
+  	}
+    
+  	/*
+  	*	Unfreezes log. 
+  	*/
+  	event void LogWrite.appendDone(void* buf, storage_len_t len, bool recordsLost, error_t err) 
+  	{
+    	storageBusy = FALSE;
+  	}
+  	
+  	
+  	
+  	
+  	
+  	
+  	
+  	
   	
   	async event void ActiveMessageAddress.changed() 
   	{
@@ -456,36 +574,55 @@ implementation
     	call SensorTimer.startPeriodic(DEFAULT_SAMPLING_INTERVAL);
     }
     
+    /*
+    *	Initiates one time reading from log
+    */ 
+    event void ReadLogTimer.fired()
+    {	
+    	if(!storageBusy)
+    	{
+	    	storageBusy = TRUE;
+	    	
+	    	if (call LogRead.read(&logEntry, sizeof(logentry_t)) != SUCCESS) 
+	    	{
+				// Handle error.
+				storageBusy = FALSE;
+	      	}   
+	    }
+	    else
+	    {
+	   		// to fast reading from log
+	   		dbg("Storage", "Reading from log was maybe to fast!");
+	   		call Leds.set(1);
+	   	}  	
+	      	
+    }
+    
     /* At each sample period:
-     - if local sample buffer is full, send accumulated samples
+     - if local sample buffer is full, store accumulated samples
      - read next sample
   	*/
     event void SensorTimer.fired()
     {	
+    	int i;
     	// collected all data for this msg?
     	if(readingCountSensorHumidity == NREADINGS)
     	{
-    	 	// send message if radio is free , reset readings
-    	 	if(TOS_NODE_ID == 0)
-    	 	{
-				//serialSendSensorMsg(&SensorHumidityMsg);
-	
-			}
-			else
+    	 	if (!storageBusy)
 			{
-				//radioSendSensorMsg(&SensorHumidityMsg);
-				//SensorHumidityMsg.seqNum = localSeqNumberSensor++;
-			}
-			
-			if (!m_busy)
-			{
-			    m_busy 		= TRUE;
-			    m_entry.len = len;
-			    m_entry.msg = *msg;
+			    storageBusy  = TRUE;
+			    logEntry.sensor = SENSOR_HUMIDITY;
+			    logEntry.version = SensorHumidityMsg.version; 
 			    
-			    if (call LogWrite.append(&m_entry, sizeof(logentry_t)) != SUCCESS) 
+			    for(i = 0; i < NREADINGS; i++)
+		  		{
+		  			logEntry.readings[i] = SensorHumidityMsg.readings[i];
+		  		}
+	
+			    
+			    if (call LogWrite.append(&logEntry, sizeof(logentry_t)) != SUCCESS) 
 			    {
-			    	m_busy = FALSE;
+			    	storageBusy = FALSE;
 			    }
 		    }
 			
@@ -494,28 +631,26 @@ implementation
     	}
     	if(readingCountSensorTemperature == NREADINGS)
     	{
-    		// send message if radio is free , reset readings
-    	 	if(TOS_NODE_ID == 0)
-    	 	{
-				//serialSendSensorMsg(&SensorTemperatureMsg);
-			}
-			else
-			{
-				//radioSendSensorMsg(&SensorTemperatureMsg);
-				//SensorTemperatureMsg.seqNum = localSeqNumberSensor++;
-			}
+    		
 			
-			if (!m_busy)
+			if (!storageBusy)
 			{
-			    m_busy 		= TRUE;
-			    m_entry.len = len;
-			    m_entry.msg = *msg;
+			    storageBusy  = TRUE;
+			    logEntry.sensor = SENSOR_TEMPERATURE;
+			    logEntry.version = SensorTemperatureMsg.version; 
 			    
-			    if (call LogWrite.append(&m_entry, sizeof(logentry_t)) != SUCCESS) 
+			    for(i = 0; i < NREADINGS; i++)
+		  		{
+		  			logEntry.readings[i] = SensorTemperatureMsg.readings[i];
+		  		}
+	
+			    
+			    if (call LogWrite.append(&logEntry, sizeof(logentry_t)) != SUCCESS) 
 			    {
-			    	m_busy = FALSE;
+			    	storageBusy = FALSE;
 			    }
 		    }
+		    
 			// reset count
 			readingCountSensorTemperature = 0;
 				   		
@@ -523,50 +658,34 @@ implementation
     	
     	if(readingCountSensorLight == NREADINGS)
     	{
-    	 	// send message if radio is free , reset readings
-    	 	if(TOS_NODE_ID == 0)
-    	 	{
-				//serialSendSensorMsg(&SensorLightMsg);
-			}
-			else
+    	 	if (!storageBusy)
 			{
-				//radioSendSensorMsg(&SensorLightMsg);
-				//SensorLightMsg.seqNum = localSeqNumberSensor++;
-			}
-		
-			if (!m_busy)
-			{
-			    m_busy 		= TRUE;
-			    m_entry.len = len;
-			    m_entry.msg = *msg;
+			    storageBusy  = TRUE;
+			    logEntry.sensor = SENSOR_LIGHT;
+			    logEntry.version = SensorLightMsg.version; 
 			    
-			    if (call LogWrite.append(&m_entry, sizeof(logentry_t)) != SUCCESS) 
+			    for(i = 0; i < NREADINGS; i++)
+		  		{
+		  			logEntry.readings[i] = SensorLightMsg.readings[i];
+		  		}
+	
+			    
+			    if (call LogWrite.append(&logEntry, sizeof(logentry_t)) != SUCCESS) 
 			    {
-			    	m_busy = FALSE;
+			    	storageBusy = FALSE;
 			    }
 		    }
+		    
 			// reset count
 			readingCountSensorLight = 0;
     	}
     	
-    	// call read of sensor if sensor is active
-    	if(SensorHumidityMsg.sensor == 1)
+    	// call read of sensor
+    	if(conf.state == CONFIG_STATE_WRITING)
     	{
-    		call SensorHumidity.read();
-    	}
-    	
-    	if(SensorTemperatureMsg.sensor == 2)
-    	{
-    	
+    		call SensorHumidity.read();   	
 #ifndef SIMULATION
     		call SensorTemperature.read();
-#endif
-    	}
-    	
-    	if(SensorLightMsg.sensor == 3)
-    	{
-    	
-#ifndef SIMULATION
     		call SensorLight.read();
 #endif	
     	}
@@ -589,10 +708,7 @@ implementation
 	 	}
   	}
   	
-  	event void LogWrite.appendDone(void* buf, storage_len_t len, recordsLost, error_t err) 
-  	{
-    	m_busy = FALSE;
-  	}
+  	
   	/*
   	*	gets fired when the timout for receiving acknowledgements from neighbors must be finished
   	*/
@@ -856,22 +972,23 @@ implementation
 				}
     			else if(msgReceived->seqNum > localSeqNumberCommand)
     			{
-    				int i;
     				dbg("TestSerialC","Finished Node %d: received message on RadioChannel seqNum: %d\n",TOS_NODE_ID,msgReceived->seqNum);
     				localSeqNumberCommand = msgReceived->seqNum;
     			    //	call Leds.set(msgReceived->ledNum);
-    				for(i=0;i<3;i++)
-    				{
-    					// activate the sensors which are specified by the sensor field in the command message
-    					if(msgReceived->sensor[i] == 1)
-    					{
-    						activateSensor(i+1);
-    					}
-    					else
-    					{
-    						deactivateSensor(i+1);
-    					}
+    				
+    				// start reading/sending of log
+    				if(msgReceived->reqSensor == 1)
+					{
+						conf.state = CONFIG_STATE_READING;
+						call Config.write(CONFIG_ADDR, &conf, sizeof(conf));
     				}
+    				// stop reading/sending of log
+    				if(msgReceived->reqSensor == 0)
+    				{
+    					conf.state = CONFIG_STATE_WRITING;
+    					call Config.write(CONFIG_ADDR, &conf, sizeof(conf));
+    				}
+    				
     				// enable/disable led
     				call Leds.set(msgReceived->ledNum);
     			}
@@ -906,88 +1023,38 @@ implementation
 			//dbg("TestSerialC","received tablemsg over radio from source: %d, sender: %d\n",source,curMsg->sender);
 			
 				
-			// entry found?
-			//if(searchedTableEntryIndex != UNDEFINED)
+			if(TOS_NODE_ID == 0)
 			{
-				// check seqNum
-				//if(curMsg->seqNum > seqNums[curMsg->sender])
-				{
-					if(TOS_NODE_ID == 0)
-					{
-						
-						//dbg("TestSerialCSerial","forward table message from %d to serial parent: %d\n",curMsg->sender,curMsg->parent);
-						//curMsg->seqNum = curMsg->seqNum + 1;
-						serialSendTable((TableMsg*)curMsg);
-						post serialSendQueueTask();
-					}
-					else
-					{
-						if(curMsg->sender != TOS_NODE_ID)
-						{
-							//if(isChild(source))
-							{
-								QueueInfo info;
-								call Leds.led0Toggle();
-	 							forwardTable((TableMsg*)curMsg,info);
-	 							post sendQueueTask();
-								// update seqNum
-								//neighborTable[searchedTableEntryIndex].seqNumTable = curMsg->seqNum;
-							
-								//dbg("TestSerialC","forward table message from %d to %d\n",curMsg->sender,curMsg->receiver);
-							}
-							//else
-							{
-								//dbg("Routing","Routing: No table msg forwarded from node: %d \n",curMsg->sender);
-							}
-						}
-					}
-					seqNums[curMsg->sender] = curMsg->seqNum;
-				}
-				//else
-				{
-					//dbg("TestSerialC","Seq no conflict!!! seqReceived: %d, seqInTable: %d\n",curMsg->seqNum,seqNums[curMsg->sender]);
-				}
+				//dbg("TestSerialCSerial","forward table message from %d to serial parent: %d\n",curMsg->sender,curMsg->parent);
+				//curMsg->seqNum = curMsg->seqNum + 1;
+				serialSendTable((TableMsg*)curMsg);
+				post serialSendQueueTask();
 			}
-			//else
+			else if(curMsg->sender != TOS_NODE_ID)
 			{
-				//dbg("TestSerialC","no entry in neighbor table found for table message forwarding\n");
+				QueueInfo info;
+				call Leds.led0Toggle();
+	 			forwardTable((TableMsg*)curMsg,info);
+	 			post sendQueueTask();
+				//dbg("TestSerialC","Seq no conflict!!! seqReceived: %d, seqInTable: %d\n",curMsg->seqNum,seqNums[curMsg->sender]);
 			}
+			
 		}
 		// if we have received a SensorMsg then check for correct seq numbers and forward the message if neccessary
 		if((id == AM_SENSORMSG) && (len == sizeof(SensorMsg)))
 		{	
 			SensorMsg* curMsg = (SensorMsg*)payload;
-			am_addr_t source = call RadioAMPacket.source(msg);
 			
-			//dbg("TestSerialC","received tablemsg over radio\n");
-			// if its node 0 then send over serial to pc, if not forward the message
 			
-			//if(searchedSensorEntryIndex != UNDEFINED)
+			if(TOS_NODE_ID == 0)
 			{
-				// check seqNum
-				if(curMsg->seqNum > seqSensors[curMsg->sender])
-				{
-					if(TOS_NODE_ID == 0)
-					{
-			
-						dbg("TestSerialCSensor","node 0 received sensor data - forward to serial\n");
-						serialSendSensorMsg((SensorMsg*)curMsg);
-					}
-					else
-					{
-						dbg("TestSerialC","forward Sensor message from %d to %d\n",curMsg->sender,curMsg->receiver);
-						//if(isChild(source))
-						{
-							radioSendSensorMsg((SensorMsg*)curMsg);
-						}
-					}
-					// update seqNum
-					seqSensors[curMsg->sender] = curMsg->seqNum;
-				}
-				else
-				{
-					//dbg("TestSerialC","Seq no conflict!!! seqReceived: %d, seqInTable: %d\n",curMsg->seqNum,seqSensors[curMsg->sender]);
-				}
+				dbg("TestSerialCSensor","node 0 received sensor data - forward to serial\n");
+				serialSendSensorMsg((SensorMsg*)curMsg);
+			}
+			else
+			{
+				dbg("TestSerialC","forward Sensor message from %d to %d\n",curMsg->sender,curMsg->receiver);
+				radioSendSensorMsg((SensorMsg*)curMsg);
 			}
 		}
     	return msg;
@@ -1132,21 +1199,21 @@ implementation
     			if(msgReceived->receiver == TOS_NODE_ID)
     			{
     				
-    				int i;
+    				
 	    			//dbg("TestSerialC","Finished Node %d: received message on RadioChannel seqNum: %d\n",TOS_NODE_ID,msgReceived->seqNum);
 	    			localSeqNumberCommand = msgReceived->seqNum;
-	    			//	call Leds.set(msgReceived->ledNum);
-	    			for(i=0;i<3;i++)
-	    			{
-	    				if(msgReceived->sensor[i] == 1)
-	    				{
-	    					activateSensor(i+1);
-	    				}
-	    				else
-	    				{
-	    					deactivateSensor(i+1);
-	    				}
-	    			}
+	    			// start reading/sending of log
+    				if(msgReceived->reqSensor == 1)
+					{
+						conf.state = CONFIG_STATE_READING;
+						call Config.write(CONFIG_ADDR, &conf, sizeof(conf));
+    				}
+    				// stop reading/sending of log
+    				if(msgReceived->reqSensor == 0)
+    				{
+    					conf.state = CONFIG_STATE_WRITING;
+    					call Config.write(CONFIG_ADDR, &conf, sizeof(conf));
+    				}
 	    			//send a CommandMsg over the serial Channel
     				serialReflect();
     				post serialSendQueueTask();
@@ -1163,9 +1230,7 @@ implementation
 						msgToSend->seqNum 		= msgReceived->seqNum;
 						msgToSend->ledNum 		= msgReceived->ledNum;
 						msgToSend->receiver 	= msgReceived->receiver;
-						msgToSend->sensor[0] 	= msgReceived->sensor[0];
-						msgToSend->sensor[1] 	= msgReceived->sensor[1];
-						msgToSend->sensor[2] 	= msgReceived->sensor[2];
+						msgToSend->reqSensor   	= msgReceived->reqSensor;
 						msgToSend->isAck 		= 0; 
 						
 						// enqueue message
@@ -1509,29 +1574,24 @@ implementation
      	int i;
      	dbg("TestSerialCSensor","initSensors\n");
      	
-     	SensorHumidityMsg.interval 	= DEFAULT_SAMPLING_INTERVAL;
+     	
     	SensorHumidityMsg.sender 	= TOS_NODE_ID;
     	SensorHumidityMsg.receiver 	= SERIAL_ADDR;
-    	SensorHumidityMsg.sensor 	= 0;
-    	SensorHumidityMsg.seqNum 	= 1;
-    	SensorHumidityMsg.count 	= NREADINGS;
+    	SensorHumidityMsg.sensor 	= SENSOR_HUMIDITY;
     	SensorHumidityMsg.version 	= 0;
                  	
-     	SensorTemperatureMsg.interval 	= DEFAULT_SAMPLING_INTERVAL;
+     	
     	SensorTemperatureMsg.sender 	= TOS_NODE_ID;
     	SensorTemperatureMsg.receiver 	= SERIAL_ADDR;
-    	SensorTemperatureMsg.sensor 	= 0;	
-    	SensorTemperatureMsg.seqNum 	= 1;
-    	SensorTemperatureMsg.count 	= NREADINGS;
+    	SensorTemperatureMsg.sensor 	= SENSOR_TEMPERATURE;	
     	SensorTemperatureMsg.version 	= 0;
          	
-     	SensorLightMsg.interval 	= DEFAULT_SAMPLING_INTERVAL;
+     	
     	SensorLightMsg.sender 		= TOS_NODE_ID;
     	SensorLightMsg.receiver 	= SERIAL_ADDR;
-    	SensorLightMsg.sensor 		= 0;	
-      	SensorLightMsg.seqNum 		= 1;
-      	SensorLightMsg.count 		= NREADINGS;
+    	SensorLightMsg.sensor 		= SENSOR_LIGHT;	
       	SensorLightMsg.version 		= 0;
+     	
      	
      	// initialize the sensor readind data
   		for(i = 0; i < NREADINGS; i++)

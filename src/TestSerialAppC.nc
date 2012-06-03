@@ -8,7 +8,8 @@ implementation {
   components ActiveMessageC as AMRadio;
   components new TimerMilliC() as BeaconTimer;
   components new TimerMilliC() as AckTimer;
-  components new TimerMilliC() as SensorTimer;
+  components new TimerMilliC() as SensorTimer; 
+  components new TimerMilliC() as ReadLogTimer;
   components new QueueC(message_t*, 10) as RadioQueueC;
   components new PoolC(message_t, 10) as RadioMsgPoolC;
   components new QueueC(QueueInfo, 10) as RadioTypeQueueC;
@@ -17,8 +18,8 @@ implementation {
   components new PoolC(message_t, 5) as SerialMsgPoolC;
   components RandomC;
   components ActiveMessageAddressC;
-  components new ConfigStorageC(VOLUME_CONFIGTEST);
-  components new LogStorageC(VOLUME_LOGTEST, TRUE);
+  components new ConfigStorageC(VOLUME_CONFIGVOLUME);
+  components new LogStorageC(VOLUME_SENSORLOGVOLUME, TRUE);
   
 #ifndef SIMULATION
   components LocalTimeSecondC;
@@ -62,6 +63,7 @@ implementation {
   
   App.LogRead -> LogStorageC;
   App.LogWrite -> LogStorageC;
+  App.ReadLogTimer -> ReadLogTimer;
   
 #ifndef SIMULATION
   App.LocalTime -> LocalTimeSecondC;

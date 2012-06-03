@@ -27,7 +27,14 @@ enum {
   SERIAL_ADDR				= 99, 		// serial address
   UNDEFINED					= 0xFFFF,
   ACK_RETRANSMIT_TIMEOUT	= 1000,
-  INTER_PACKET_INTERVAL 	= 25
+  READLOG_INTERVAL 			= 25,		// read from log every milliseconds 
+  CONFIG_ADDR 				= 0,
+  CONFIG_STATE_INIT			= 0,
+  CONFIG_STATE_WRITING  	= 1,
+  CONFIG_STATE_READING  	= 2,
+  SENSOR_HUMIDITY			= 1, 		
+  SENSOR_TEMPERATURE		= 2, 
+  SENSOR_LIGHT				= 3 	
 };
 
 typedef nx_struct CommandMsg {
@@ -35,14 +42,14 @@ typedef nx_struct CommandMsg {
   nx_uint16_t ledNum;
   nx_uint16_t sender;
   nx_uint16_t receiver;
-  nx_uint8_t sensor[3]; 	//starts or stops reading of 3 sensors
+  nx_uint8_t reqSensor; 	// requests sending of sensor data 0 = no, 1 = yes
   nx_uint8_t isAck;
 } CommandMsg;
 
 typedef nx_struct BeaconMsg {
   nx_uint16_t sender;
   nx_uint16_t parent;		// chosen parent
-  nx_uint16_t hops;		// hop count to mote 0
+  nx_uint16_t hops;			// hop count to mote 0
   nx_uint16_t avgRSSI;		// average RSSI
   nx_uint16_t version;		// avoid loops, update if connection is lost and then broadcast updated version
 } BeaconMsg;
@@ -53,26 +60,23 @@ typedef struct MoteTableEntry {
   uint16_t lastContact;
   bool expired;
   uint16_t hops;			// hop count to mote 0
-  uint16_t avgRSSI;		// average RSSI
+  uint16_t avgRSSI;			// average RSSI
   uint16_t parentMote;		// chosen parent mote of neighbor
   bool childMote;			// child of current mote; forward msg only if child == true
 } MoteTableEntry;
 
 typedef nx_struct SensorMsg {
-	nx_uint16_t version; /* Version of the interval. */
   nx_uint16_t receiver; 			/* should be serial */
-  nx_uint8_t sensor; 				/* From which sensor? 0 means not active*/
-  nx_uint16_t interval; 			/* Samping period. */
   nx_uint16_t sender; 				/* Mote id of sending mote. */
-  nx_uint16_t seqNum;				/* seq num for the sensor message*/
-  nx_uint16_t count; /* The readings are samples count * NREADINGS onwards */
-  nx_uint16_t readings[NREADINGS];
+  nx_uint8_t  sensor; 				/* From which sensor? 0 means not active*/
+  nx_uint16_t version; 				/* Version of the interval. */
+  nx_uint16_t readings[NREADINGS];  /* data */
 } SensorMsg;
 
 typedef nx_struct TableMsg {
   nx_uint16_t seqNum;
   nx_uint16_t sender; 
-  nx_uint8_t receiver; 
+  nx_uint8_t  receiver; 
   nx_uint16_t nodeId[AM_TABLESIZE];
   nx_uint16_t lastContact[AM_TABLESIZE]; 
   nx_uint16_t parent; 		// chosen parent mote of sender
@@ -84,21 +88,15 @@ typedef struct QueueInfo{
 } QueueInfo;
 
 typedef struct config_t {
-  	uint16_t positionW;
-  	uint16_t positionR;
+	uint8_t  state;        // state of the storage: no data/init, writing, reading  	
+	uint16_t version;
 } config_t;
 
-enum {
-    CONFIG_ADDR 	= 0,
-    CONFIG_VERSION = 1,
-    DEFAULT_PERIOD = 1024,
-    MIN_PERIOD     = 128,
-    MAX_PERIOD     = 1024
-};
 
 typedef nx_struct logentry_t {
-  nx_uint8_t len;
-  nx_uint16_t readings[NREADINGS];
+  nx_uint8_t sensor;					/* From which sensor */
+  nx_uint16_t readings[NREADINGS];		/* Data of a sensor  */
+  nx_uint16_t version; 				    /* Version of the interval. */
 } logentry_t;
 
 
