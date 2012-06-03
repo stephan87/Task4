@@ -248,11 +248,9 @@ implementation
 	      		// note: conf is overwritten from storage
 	      		if (conf.state == CONFIG_STATE_INIT) 
 	      		{
-	        		// start writing to log
+	      			// start writing to log
 	        		conf.state = CONFIG_STATE_WRITING;
-	        		call Config.write(CONFIG_ADDR, &conf, sizeof(conf));
-	        		call Leds.set(1);
-	        		
+	        		call Config.write(CONFIG_ADDR, &conf, sizeof(conf));        		
 	        		
 	      		}
 	      		else if (conf.state == CONFIG_STATE_WRITING) 
@@ -851,13 +849,19 @@ implementation
   			int16_t freeSlot = -1;
   			uint16_t i;
   			bool found = FALSE;
-  			uint16_t avgRssiOfSender; 
+  			uint16_t newAvgRSSI; 
   			
   			msgReceived = (BeaconMsg*)payload;
   			
   			//calculate avgRSSI
-  			avgRssiOfSender = GETRSSI;
-  			
+  			if(msgReceived->hops != UNDEFINED)
+  			{
+  				newAvgRSSI = (((msgReceived->avgRSSI) * (msgReceived->hops)) + GETRSSI) / (msgReceived->hops + 1) ;
+  			}
+  			else
+  			{
+  				newAvgRSSI = 0;
+  			}
   			
   			// when received a beacon add an entry to the neighbour table and ack
   			for(i=0;i<AM_TABLESIZE;i++)
@@ -976,21 +980,21 @@ implementation
   				else
   				{
 	  				localVersion = msgReceived->version;
-	  				localAvgRSSI = msgReceived->avgRSSI + avgRssiOfSender;
+	  				localAvgRSSI = newAvgRSSI;
 	  				localHops 	 = msgReceived->hops + 1;
 	  			}  				
   			}
   			//update route if necessary
   			if((msgReceived->parent != TOS_NODE_ID) && (msgReceived->parent != UNDEFINED)) //&&  // msg not from child, avoids loops
   			{
-  				if((msgReceived->hops + 1 < localHops) )//|| // better hopCount
-  						//((msgReceived->hops+1 == localHops) && ((msgReceived->avgRSSI + avgRssiOfSender) < localAvgRSSI) ))	//same hopCount but better RSSI?
+  				if(  (msgReceived->hops + 1 < localHops) // better hopCount
+  				|| ((msgReceived->hops+1 == localHops) && (newAvgRSSI > localAvgRSSI)) )	//same hopCount but better RSSI?
   				{
   					dbg("Routing","update routing information: msgReceived->sender=%d,msgReceived->parent=%d, msgReceived->version=%d, localVersion=%d , hopsMsg=%d, localhops=%d\n",msgReceived->sender,msgReceived->parent,msgReceived->version,localVersion, msgReceived->hops,localHops);
   					//new parent
   					chosenParent = msgReceived->sender;
   					localVersion = msgReceived->version;
-  					localAvgRSSI = msgReceived->avgRSSI + avgRssiOfSender;
+  					localAvgRSSI = newAvgRSSI;
   					localHops 	 = msgReceived->hops + 1;
   				
   					// broadcast new info

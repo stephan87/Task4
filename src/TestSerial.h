@@ -5,9 +5,9 @@
 #define SIMULATION2
 #ifdef SIMULATION
 #define GETTIME time(NULL)
-#define GETRSSI (55) / (msgReceived->hops + 1)
+#define GETRSSI (200) 
 #else
-#define GETTIME call LocalTime.get()
+#define GETTIME call LocalTime.get() 
 #define GETRSSI call CC2420Packet.getRssi(msg)
 #endif
 
@@ -36,7 +36,7 @@ enum {
   SENSOR_TEMPERATURE		= 2, 
   SENSOR_LIGHT				= 3,
   TABLE_MSG_INTERVAL 		= 6000, 
-  FLASH_VERSION				= 3
+  FLASH_VERSION				= 1
 };
 
 typedef nx_struct CommandMsg {
