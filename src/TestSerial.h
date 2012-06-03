@@ -18,7 +18,7 @@ enum {
   AM_SENSORMSG				= 4,		// channel identifier for sensormsgs
   AM_TABLEMSG				= 3,		// channel identifier for tablemsgs
   AM_BEACONINTERVAL 		= 1000,		// period in which beacon msgs are sent
-  AM_BEACONTIMEOUT			= 8, 		// in seconds
+  AM_BEACONTIMEOUT			= 9, 		// in seconds
   AM_TABLESIZE 				= 4,		// maximum amount of table entries
   AM_ACKTIMEOUT				= 2000,		// timeout in ms within the acks must be received
   AM_MAXNODEID				= 65535,	// used as default undefined value
@@ -27,14 +27,16 @@ enum {
   SERIAL_ADDR				= 99, 		// serial address
   UNDEFINED					= 0xFFFF,
   ACK_RETRANSMIT_TIMEOUT	= 1000,
-  READLOG_INTERVAL 			= 25,		// read from log every milliseconds 
+  READLOG_INTERVAL 			= 100,		// read from log every milliseconds 
   CONFIG_ADDR 				= 0,
   CONFIG_STATE_INIT			= 0,
   CONFIG_STATE_WRITING  	= 1,
   CONFIG_STATE_READING  	= 2,
   SENSOR_HUMIDITY			= 1, 		
   SENSOR_TEMPERATURE		= 2, 
-  SENSOR_LIGHT				= 3 	
+  SENSOR_LIGHT				= 3,
+  TABLE_MSG_INTERVAL 		= 6000, 
+  FLASH_VERSION				= 3
 };
 
 typedef nx_struct CommandMsg {
@@ -74,12 +76,12 @@ typedef nx_struct SensorMsg {
 } SensorMsg;
 
 typedef nx_struct TableMsg {
-  nx_uint16_t seqNum;
   nx_uint16_t sender; 
   nx_uint8_t  receiver; 
   nx_uint16_t nodeId[AM_TABLESIZE];
   nx_uint16_t lastContact[AM_TABLESIZE]; 
   nx_uint16_t parent; 		// chosen parent mote of sender
+  nx_uint16_t avgRSSI;
 } TableMsg;
 
 typedef struct QueueInfo{
@@ -88,8 +90,9 @@ typedef struct QueueInfo{
 } QueueInfo;
 
 typedef struct config_t {
-	uint8_t  state;        // state of the storage: no data/init, writing, reading  	
-	uint16_t version;
+	uint8_t  state;         // state of the storage: no data/init, writing, reading  	
+	uint16_t version;		// count of restarts
+	uint8_t flashVersion;	// to delete conf			
 } config_t;
 
 

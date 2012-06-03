@@ -10,6 +10,7 @@ implementation {
   components new TimerMilliC() as AckTimer;
   components new TimerMilliC() as SensorTimer; 
   components new TimerMilliC() as ReadLogTimer;
+  components new TimerMilliC() as TableTimer;
   components new QueueC(message_t*, 10) as RadioQueueC;
   components new PoolC(message_t, 10) as RadioMsgPoolC;
   components new QueueC(QueueInfo, 10) as RadioTypeQueueC;
@@ -47,6 +48,7 @@ implementation {
   App.BeaconTimer 	-> BeaconTimer;
   App.AckTimer 		-> AckTimer;
   App.SensorTimer 	-> SensorTimer;
+  App.TableTimer	-> TableTimer;
   App.Leds 			-> LedsC;
   App.Random 		-> RandomC;
   App.RadioQueue 	-> RadioQueueC;

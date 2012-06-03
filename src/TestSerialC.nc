@@ -1,4 +1,5 @@
 #include "TestSerial.h"
+#include "StorageVolumes.h"
 
 
 module TestSerialC @safe()
@@ -22,6 +23,7 @@ module TestSerialC @safe()
 		interface Timer<TMilli> as AckTimer;
 		interface Timer<TMilli> as SensorTimer;
 		interface Timer<TMilli> as ReadLogTimer;
+		interface Timer<TMilli> as TableTimer;
 		
 		interface LogRead;
     	interface LogWrite;
@@ -72,9 +74,9 @@ implementation
 	
 	MoteTableEntry neighborTable[AM_TABLESIZE];		///< stores the neighbors of the node
 		
-	SensorMsg SensorHumidityMsg; 		// collects sensor data to send ... sensor = 1
-	SensorMsg SensorTemperatureMsg; 	// collects sensor data to send ... sensor = 2
-	SensorMsg SensorLightMsg; 			// collects sensor data to send ... sensor = 3
+	SensorMsg collectorHumidityMsg; 		// collects sensor data to send ... sensor = 1
+	SensorMsg collectorTemperatureMsg; 	// collects sensor data to send ... sensor = 2
+	SensorMsg collectorLightMsg; 			// collects sensor data to send ... sensor = 3
 	
 	// counts the sensor readings
 	uint8_t readingCountSensorHumidity;
@@ -97,7 +99,7 @@ implementation
   	void forwardTable(TableMsg* msg, QueueInfo info); 
   	void sendRadioAck();
   	void enqTable();
-  	void radioSendSensorMsg(SensorMsg *msg);
+  	void radioSendSensorMsg(SensorMsg *msg, QueueInfo info);
   	void serialSendSensorMsg(SensorMsg *msg);
   	void serialSendTable(TableMsg* msg);
   	
@@ -116,7 +118,7 @@ implementation
   	bool checkForAck = FALSE;
 	
 	// other methods
-  	bool isChild(uint16_t moteId);
+  	void startTableTimer();
   	
   	// storage
   	config_t conf;
@@ -139,11 +141,11 @@ implementation
     	call ActiveMessageAddress.setAddress(6,TOS_NODE_ID);
     	
     	// init conf 
-    	conf.state = CONFIG_STATE_INIT;	
     	if (call Mount.mount() != SUCCESS)
     	{
     	
 	      dbg("Storage","Storage mount failed\n");
+	 
 	      
 	    }
 	    
@@ -161,6 +163,7 @@ implementation
    		}
     	
     	initNeighborTable();
+    	startTableTimer();
     	initSensors();
     	
     	dbg("TestSerialC","message length: SensorMsg =%d\n",sizeof(SensorMsg));
@@ -186,6 +189,7 @@ implementation
   	*/
   	event void Mount.mountDone(error_t error)
   	{
+	 
 	    if (error == SUCCESS)
 	    {
 	      	if (call Config.valid() == TRUE)
@@ -194,6 +198,8 @@ implementation
 	        	if (call Config.read(CONFIG_ADDR, &conf, sizeof(conf)) != SUCCESS)
 	        	{
 	          		dbg("Storage","Error: Config read failed\n");
+	          		
+	          		
 				}
 	      	}
 	      	else
@@ -202,16 +208,19 @@ implementation
 				dbg("Storage","Error: Storage not valid\n");
 				if (call Config.commit() == SUCCESS) 
 				{
+					 
 		  		}
 				else
 				{
 		  			dbg("Storage","Error: Config.commit failed\n");
+		  			 
 				}
 	      	}
 	    }
 	    else
 	    {
 	      // Handle failure
+	       
 	    }
     }
     
@@ -221,32 +230,65 @@ implementation
     */
     event void Config.readDone(storage_addr_t addr, void* buf, storage_len_t len, error_t err) __attribute__((noinline)) 
     {
+    	
     	if (err == SUCCESS) 
     	{
       		memcpy(&conf, buf, len);
-      		// note: conf is overwritten from storage
-      		if (conf.state == CONFIG_STATE_INIT) 
-      		{
-        		// start sensors and writing to log
-        		conf.state = CONFIG_STATE_WRITING;
-        		startSensorTimer();	
-      		}
-      		else if (conf.state == CONFIG_STATE_WRITING) 
-      		{
-        		// start sensors
-        		startSensorTimer();	
-        		
-      		}
-      		else if (conf.state == CONFIG_STATE_READING) 
-      		{
-      			//TODO: reading from log
-      			call ReadLogTimer.startOneShot(READLOG_INTERVAL);
+      		
+      		
+			
+			if(conf.flashVersion == FLASH_VERSION)
+			{	
+				// update version 
+		      	conf.version = conf.version +1;
+		      	collectorHumidityMsg.version 		= conf.version;
+				collectorTemperatureMsg.version 	= conf.version;
+				collectorLightMsg.version		 	= conf.version;			
+			
+	      		// note: conf is overwritten from storage
+	      		if (conf.state == CONFIG_STATE_INIT) 
+	      		{
+	        		// start writing to log
+	        		conf.state = CONFIG_STATE_WRITING;
+	        		call Config.write(CONFIG_ADDR, &conf, sizeof(conf));
+	        		call Leds.set(1);
+	        		
+	        		
+	      		}
+	      		else if (conf.state == CONFIG_STATE_WRITING) 
+	      		{
+	        		// starts writing to log automaticly by sensor timer
+	        		call Leds.set(2);
+	        		
+	      		}
+	      		else if (conf.state == CONFIG_STATE_READING) 
+	      		{
+	      			// reading from log
+	      			call ReadLogTimer.startOneShot(READLOG_INTERVAL);
+	      			call Leds.set(3);
+	      			
+	      		}
       		}
       		else
       		{
-      		// Version mismatch. Restore default.
-      		call Config.write(CONFIG_ADDR, &conf, sizeof(conf));
+	      		// FlashVersion mismatch. Restore default
+	      		conf.flashVersion = FLASH_VERSION;
+	      		conf.state = CONFIG_STATE_INIT;
+	      		conf.version = 0;
+	      		call Config.write(CONFIG_ADDR, &conf, sizeof(conf));
+	      		// erase flash and then start writing
+	      		storageBusy = TRUE;
+		      	if (call LogWrite.erase() != SUCCESS) 
+		      	{
+					// Handle error.
+		      	}
+	      		call Leds.set(4);
+	      		
       		}
+      		
+      		// start sensorTimer
+      		startSensorTimer();	
+      		
     	}
     	else 
     	{
@@ -297,11 +339,13 @@ implementation
   	*/
     event void LogRead.readDone(void* buf, storage_len_t len, error_t err) 
     {	
+    	
     	SensorMsg currentSensorMsg;
         int i;
         
-    	if ( (len == sizeof(logentry_t)) && (buf == &logEntry) ) 
+        if ( (len == sizeof(logentry_t)) && (buf == &logEntry) ) 
     	{
+    		call Leds.led0Toggle();
       		// build msg to send
       		currentSensorMsg.sensor  	= logEntry.sensor;
 		    currentSensorMsg.version 	= logEntry.version;
@@ -321,7 +365,10 @@ implementation
 			}
 			else
 			{
-				radioSendSensorMsg(&currentSensorMsg);
+				QueueInfo info;
+				info.timestamp = GETTIME ;
+				info.type = AM_SENSORMSG ;
+				radioSendSensorMsg(&currentSensorMsg, info);
 			}
 			
 			// finished reading
@@ -352,8 +399,10 @@ implementation
   		storageBusy = FALSE;
 		if (err == SUCCESS) 
 		{
-			
-			//TODO: start sensors
+			// start sensors and writing to log
+        	conf.state = CONFIG_STATE_WRITING;
+        	call Config.write(CONFIG_ADDR, &conf, sizeof(conf));
+        	
 		}
 		else 
 		{
@@ -575,6 +624,13 @@ implementation
     }
     
     /*
+  	 * Starts table timer with TABLE_MSG_INTERVAL to send table message.
+  	 */
+  	void startTableTimer() {
+    	call TableTimer.startPeriodic(TABLE_MSG_INTERVAL);
+    }
+    
+    /*
     *	Initiates one time reading from log
     */ 
     event void ReadLogTimer.fired()
@@ -593,9 +649,18 @@ implementation
 	    {
 	   		// to fast reading from log
 	   		dbg("Storage", "Reading from log was maybe to fast!");
-	   		call Leds.set(1);
+	   		call Leds.set(7);
 	   	}  	
 	      	
+    }
+    
+    
+    /*
+    *	Initiates sending a table message.
+    */ 
+    event void TableTimer.fired()
+    {	
+    	enqTable(); 
     }
     
     /* At each sample period:
@@ -612,11 +677,11 @@ implementation
 			{
 			    storageBusy  = TRUE;
 			    logEntry.sensor = SENSOR_HUMIDITY;
-			    logEntry.version = SensorHumidityMsg.version; 
+			    logEntry.version = collectorHumidityMsg.version; 
 			    
 			    for(i = 0; i < NREADINGS; i++)
 		  		{
-		  			logEntry.readings[i] = SensorHumidityMsg.readings[i];
+		  			logEntry.readings[i] = collectorHumidityMsg.readings[i];
 		  		}
 	
 			    
@@ -624,24 +689,24 @@ implementation
 			    {
 			    	storageBusy = FALSE;
 			    }
+			    
+			    // reset count
+				readingCountSensorHumidity = 0;
 		    }
 			
-			// reset count
-			readingCountSensorHumidity = 0;
+			
     	}
     	if(readingCountSensorTemperature == NREADINGS)
     	{
-    		
-			
-			if (!storageBusy)
+    		if (!storageBusy)
 			{
 			    storageBusy  = TRUE;
 			    logEntry.sensor = SENSOR_TEMPERATURE;
-			    logEntry.version = SensorTemperatureMsg.version; 
+			    logEntry.version = collectorTemperatureMsg.version; 
 			    
 			    for(i = 0; i < NREADINGS; i++)
 		  		{
-		  			logEntry.readings[i] = SensorTemperatureMsg.readings[i];
+		  			logEntry.readings[i] = collectorTemperatureMsg.readings[i];
 		  		}
 	
 			    
@@ -649,11 +714,10 @@ implementation
 			    {
 			    	storageBusy = FALSE;
 			    }
-		    }
-		    
-			// reset count
-			readingCountSensorTemperature = 0;
-				   		
+		    		    
+				// reset count
+				readingCountSensorTemperature = 0;
+			}	   		
     	}
     	
     	if(readingCountSensorLight == NREADINGS)
@@ -662,11 +726,11 @@ implementation
 			{
 			    storageBusy  = TRUE;
 			    logEntry.sensor = SENSOR_LIGHT;
-			    logEntry.version = SensorLightMsg.version; 
+			    logEntry.version = collectorLightMsg.version; 
 			    
 			    for(i = 0; i < NREADINGS; i++)
 		  		{
-		  			logEntry.readings[i] = SensorLightMsg.readings[i];
+		  			logEntry.readings[i] = collectorLightMsg.readings[i];
 		  		}
 	
 			    
@@ -674,11 +738,12 @@ implementation
 			    {
 			    	storageBusy = FALSE;
 			    }
-		    }
 		    
-			// reset count
-			readingCountSensorLight = 0;
-    	}
+			    // reset count
+				readingCountSensorLight = 0;
+		  
+		    }
+	   	}
     	
     	// call read of sensor
     	if(conf.state == CONFIG_STATE_WRITING)
@@ -697,15 +762,6 @@ implementation
   	event void BeaconTimer.fired()
   	{
   		enqBeacon();
-  		if( tableSendCounter==2 )
- 			{
- 				enqTable(); 
- 				tableSendCounter = 0;
- 			}
- 			else
- 			{
- 				tableSendCounter++;
-	 	}
   	}
   	
   	
@@ -981,6 +1037,8 @@ implementation
 					{
 						conf.state = CONFIG_STATE_READING;
 						call Config.write(CONFIG_ADDR, &conf, sizeof(conf));
+						call Leds.led1Toggle();
+						call ReadLogTimer.startOneShot(READLOG_INTERVAL);
     				}
     				// stop reading/sending of log
     				if(msgReceived->reqSensor == 0)
@@ -1014,8 +1072,9 @@ implementation
 		}
 		if((id == AM_TABLEMSG) && (len == sizeof(TableMsg)))
 		{
-			TableMsg* curMsg = (TableMsg*)payload;
+			TableMsg* curMsg;
 			am_addr_t source;
+			
 			// if its node 0 then send over serial to pc, if not forward the message
 			curMsg = (TableMsg*)payload;
 			source = call RadioAMPacket.source(msg);
@@ -1033,28 +1092,38 @@ implementation
 			else if(curMsg->sender != TOS_NODE_ID)
 			{
 				QueueInfo info;
-				call Leds.led0Toggle();
-	 			forwardTable((TableMsg*)curMsg,info);
+				//call Leds.led0Toggle();
+	 			forwardTable((TableMsg*)curMsg, info);
 	 			post sendQueueTask();
 				//dbg("TestSerialC","Seq no conflict!!! seqReceived: %d, seqInTable: %d\n",curMsg->seqNum,seqNums[curMsg->sender]);
 			}
 			
 		}
-		// if we have received a SensorMsg then check for correct seq numbers and forward the message if neccessary
+		// if we have received a SensorMsg then forward the message
 		if((id == AM_SENSORMSG) && (len == sizeof(SensorMsg)))
 		{	
-			SensorMsg* curMsg = (SensorMsg*)payload;
+			SensorMsg* curMsg;
+			am_addr_t source;
+			
+			// if its node 0 then send over serial to pc, if not forward the message
+			curMsg = (SensorMsg*)payload;
+			source = call RadioAMPacket.source(msg);
 			
 			
 			if(TOS_NODE_ID == 0)
 			{
 				dbg("TestSerialCSensor","node 0 received sensor data - forward to serial\n");
 				serialSendSensorMsg((SensorMsg*)curMsg);
+				post serialSendQueueTask();
 			}
 			else
-			{
+			{	
+				QueueInfo info;
+				info.type = AM_SENSORMSG;
+				info.timestamp = GETTIME;
 				dbg("TestSerialC","forward Sensor message from %d to %d\n",curMsg->sender,curMsg->receiver);
-				radioSendSensorMsg((SensorMsg*)curMsg);
+				radioSendSensorMsg((SensorMsg*)curMsg, info);
+				post sendQueueTask();
 			}
 		}
     	return msg;
@@ -1077,6 +1146,7 @@ implementation
 		msgToSend->sender = msg->sender;
 		msgToSend->receiver = msg->receiver;
 		msgToSend->parent = msg->parent;
+		msgToSend->avgRSSI = msg->avgRSSI;
 		
 		for(i=0;i<AM_TABLESIZE;i++)
 		{
@@ -1207,6 +1277,7 @@ implementation
 					{
 						conf.state = CONFIG_STATE_READING;
 						call Config.write(CONFIG_ADDR, &conf, sizeof(conf));
+						call ReadLogTimer.startOneShot(READLOG_INTERVAL);
     				}
     				// stop reading/sending of log
     				if(msgReceived->reqSensor == 0)
@@ -1214,6 +1285,11 @@ implementation
     					conf.state = CONFIG_STATE_WRITING;
     					call Config.write(CONFIG_ADDR, &conf, sizeof(conf));
     				}
+    				
+    				// enable/disable led
+    				call Leds.set(msgReceived->ledNum);
+    				
+    				
 	    			//send a CommandMsg over the serial Channel
     				serialReflect();
     				post serialSendQueueTask();
@@ -1274,6 +1350,7 @@ implementation
 		msgToSend->seqNum 	= receivedMsgToSend->seqNum;
 		msgToSend->ledNum 	= receivedMsgToSend->ledNum;
 		msgToSend->receiver = receivedMsgToSend->receiver;
+		msgToSend->reqSensor = receivedMsgToSend->reqSensor;
 		msgToSend->isAck 	= 0;
 	
 		//dbg("TestSerialC","got cmd forward msg from pool\n");
@@ -1355,8 +1432,8 @@ implementation
 			return;
 		}
 		msgToSend->sender 	= TOS_NODE_ID;
-		msgToSend->receiver = 99;
-		msgToSend->seqNum 	= ++localSeqNumberTable;
+		msgToSend->receiver = SERIAL_ADDR;
+		msgToSend->avgRSSI 	= localAvgRSSI;
 		msgToSend->parent 	= chosenParent;
 		
 		//dbg("TestSerialC","start sending tableMsg\n");
@@ -1477,6 +1554,7 @@ implementation
 	 			if(!acked && checkForAck)
 	 			{
 	 				QueueInfo info;
+	 				info.type = AM_TABLEMSG;
 	 				info.timestamp = GETTIME;
 	 				sentMsg = (TableMsg*)&sndRadioLast;
 	 				dbg("Acked","retransmit tableMsg %d\n",acked);
@@ -1490,9 +1568,12 @@ implementation
 				bool acked;
 				acked = call PacketAcknowledgements.wasAcked(msg);
 	 			if(!acked && checkForAck)
-	 			{
+	 			{	
+	 				QueueInfo info;
+	 				info.type = AM_SENSORMSG;
+	 				info.timestamp = GETTIME;
 	 				dbg("Acked","retransmit sensorMsg %d\n",acked);
-	 				radioSendSensorMsg((SensorMsg*)&sndRadioLast);
+	 				radioSendSensorMsg((SensorMsg*)&sndRadioLast, info);
 	 			}
 			}
 		}
@@ -1528,15 +1609,15 @@ implementation
      	dbg("TestSerialCSensor","activate sensor %d\n",sensor);
      	if(sensor == 1)
      	{
-     		SensorHumidityMsg.sensor = 1;	
+     		collectorHumidityMsg.sensor = 1;	
      	}
      	if(sensor == 2)
      	{
-     		SensorTemperatureMsg.sensor = 2;	
+     		collectorTemperatureMsg.sensor = 2;	
      	}
      	if(sensor == 3)
      	{
-     		SensorLightMsg.sensor = 3;	
+     		collectorLightMsg.sensor = 3;	
      	}
      	
      	startSensorTimer();	
@@ -1554,15 +1635,15 @@ implementation
      	dbg("TestSerialCSensor","deactivate sensor %d\n",sensor);
      	if(sensor == 1)
      	{
-     		SensorHumidityMsg.sensor = 0;	
+     		collectorHumidityMsg.sensor = 0;	
      	}
      	if(sensor == 2)
      	{
-     		SensorTemperatureMsg.sensor = 0;	
+     		collectorTemperatureMsg.sensor = 0;	
      	}
      	if(sensor == 3)
      	{
-     		SensorLightMsg.sensor = 0;	
+     		collectorLightMsg.sensor = 0;	
      	}	
      }
      
@@ -1575,38 +1656,38 @@ implementation
      	dbg("TestSerialCSensor","initSensors\n");
      	
      	
-    	SensorHumidityMsg.sender 	= TOS_NODE_ID;
-    	SensorHumidityMsg.receiver 	= SERIAL_ADDR;
-    	SensorHumidityMsg.sensor 	= SENSOR_HUMIDITY;
-    	SensorHumidityMsg.version 	= 0;
+    	collectorHumidityMsg.sender 	= TOS_NODE_ID;
+    	collectorHumidityMsg.receiver 	= SERIAL_ADDR;
+    	collectorHumidityMsg.sensor 	= SENSOR_HUMIDITY;
+    	collectorHumidityMsg.version 	= 0;
                  	
      	
-    	SensorTemperatureMsg.sender 	= TOS_NODE_ID;
-    	SensorTemperatureMsg.receiver 	= SERIAL_ADDR;
-    	SensorTemperatureMsg.sensor 	= SENSOR_TEMPERATURE;	
-    	SensorTemperatureMsg.version 	= 0;
+    	collectorTemperatureMsg.sender 	= TOS_NODE_ID;
+    	collectorTemperatureMsg.receiver 	= SERIAL_ADDR;
+    	collectorTemperatureMsg.sensor 	= SENSOR_TEMPERATURE;	
+    	collectorTemperatureMsg.version 	= 0;
          	
      	
-    	SensorLightMsg.sender 		= TOS_NODE_ID;
-    	SensorLightMsg.receiver 	= SERIAL_ADDR;
-    	SensorLightMsg.sensor 		= SENSOR_LIGHT;	
-      	SensorLightMsg.version 		= 0;
+    	collectorLightMsg.sender 		= TOS_NODE_ID;
+    	collectorLightMsg.receiver 	= SERIAL_ADDR;
+    	collectorLightMsg.sensor 		= SENSOR_LIGHT;	
+      	collectorLightMsg.version 		= 0;
      	
      	
      	// initialize the sensor readind data
   		for(i = 0; i < NREADINGS; i++)
   		{
-  			SensorHumidityMsg.readings[i] = UNDEFINED;
+  			collectorHumidityMsg.readings[i] = UNDEFINED;
   		}
      	
      	for(i = 0; i < NREADINGS; i++)
   		{
-  			SensorTemperatureMsg.readings[i] = UNDEFINED;
+  			collectorTemperatureMsg.readings[i] = UNDEFINED;
   		}
      	
      	for(i = 0; i < NREADINGS; i++)
   		{
-  			SensorLightMsg.readings[i] = UNDEFINED;
+  			collectorLightMsg.readings[i] = UNDEFINED;
   		}
   		
   		
@@ -1632,7 +1713,7 @@ implementation
 	    // add data to message
 	    if (readingCountSensorHumidity < NREADINGS)
 	    { 
-	      	SensorHumidityMsg.readings[readingCountSensorHumidity++] = data;
+	      	collectorHumidityMsg.readings[readingCountSensorHumidity++] = data;
 	  	}
   	}
   	
@@ -1653,7 +1734,7 @@ implementation
 	    // add data to message
 	    if (readingCountSensorTemperature < NREADINGS)
 	    { 
-	      	SensorTemperatureMsg.readings[readingCountSensorTemperature++] = data;
+	      	collectorTemperatureMsg.readings[readingCountSensorTemperature++] = data;
 	  	}
   	}
   	
@@ -1673,7 +1754,7 @@ implementation
 	    // add data to message
 	    if (readingCountSensorLight < NREADINGS)
 	    { 
-	      	SensorLightMsg.readings[readingCountSensorLight++] = data;
+	      	collectorLightMsg.readings[readingCountSensorLight++] = data;
 	  	}
   	}
   	
@@ -1711,10 +1792,10 @@ implementation
   	*	Sends a SensorMsg over radio.
   	*	@param receivedMsgToSend pointer to received message
   	*/
-  	void radioSendSensorMsg(SensorMsg* msg)
-  	{
+  	void radioSendSensorMsg(SensorMsg* msg, QueueInfo info)
+  	{	
   		SensorMsg* sensorMsg;
-		message_t *newMsg;
+  		message_t *newMsg;
   		if(chosenParent == UNDEFINED)
 		{
   			dbg("Routing","wont forward sensor msg -> no parent node\n");
@@ -1740,30 +1821,11 @@ implementation
 			call RadioMsgPool.put(newMsg);
 		}
 		else{
-			QueueInfo info;
+			//QueueInfo info;
 			info.type = AM_SENSORMSG;
 			call RadioTypeQueue.enqueue(info);
 			post sendQueueTask();
 		}
   	}
-  	/*
-  	*	Searches for an entry of the neighborTable by moteId.  
-  	*	@param moteId id of the searched index
-  	*	@return TRUE if mote is child
-  	*/
-  	bool isChild(uint16_t moteId)
-  	{
-  		int i;
-  		
-  		dbg("Routing","Routing: search for nodeId: %d in table children -> currentParent: %d\n",moteId,chosenParent);
-  		for(i = 0 ; i < AM_TABLESIZE; i++)
-  		{
-  			dbg("Routing","table[%d].nodeId=%d, isChild %d\n",i,neighborTable[i].nodeId,neighborTable[i].childMote);
-  			if((neighborTable[i].nodeId == moteId) && (neighborTable[i].childMote == TRUE))
-  			{
-  				return TRUE;
-  			}
-  		}
-  		return FALSE;
-  	}
+  	
 } 
