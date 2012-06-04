@@ -1,5 +1,6 @@
 #include "TestSerial.h"
 #include "StorageVolumes.h"
+#include "printf.h"
 
 configuration TestSerialAppC {}
 implementation {
@@ -21,6 +22,7 @@ implementation {
   components ActiveMessageAddressC;
   components new ConfigStorageC(VOLUME_CONFIGVOLUME);
   components new LogStorageC(VOLUME_SENSORLOGVOLUME, TRUE);
+  components PrintfC;
   
 #ifndef SIMULATION
   components LocalTimeSecondC;

@@ -1,5 +1,6 @@
 #include "TestSerial.h"
 #include "StorageVolumes.h"
+#include "printf.h"
 
 
 module TestSerialC @safe()
@@ -88,7 +89,7 @@ implementation
 	
 	// routing
 	uint16_t localHops 		= UNDEFINED; 	// lower is better
-	uint16_t localAvgRSSI 	= 0;			// higher is better
+	uint16_t localAvgLqi 	= 0;			// higher is better
 	uint16_t chosenParent 	= UNDEFINED; 	// UNDEFINED = no parent 
 	uint16_t localVersion 	= UNDEFINED; 	// not set
 	
@@ -129,6 +130,11 @@ implementation
   	
   	
   	
+  	/*******************************************************************************************
+  	*
+  	*								Boot, initTable
+  	*
+  	*******************************************************************************************/
   	
   	/*
   	*	Method which is called after the Mote booted
@@ -143,22 +149,17 @@ implementation
     	// init conf 
     	if (call Mount.mount() != SUCCESS)
     	{
-    	
-	      dbg("Storage","Storage mount failed\n");
-	 
-	      
+    	     dbg("Storage","Storage mount failed\n");
 	    }
 	    
-	    
-	    
-	    
+		    
     	if(TOS_NODE_ID == 0)
     	{
     		call SerialControl.start();
     		// routing... new version
     		localVersion = call Random.rand16(); 
     		localHops = 0; 	// lower is better
-			localAvgRSSI = 255;		// higher is better
+			localAvgLqi = 255;		// higher is better
 			chosenParent = 0; // UNDEFINED = no parent 
    		}
     	
@@ -176,13 +177,28 @@ implementation
     	call BeaconTimer.startPeriodic( AM_BEACONINTERVAL );
   	}
   	
+  	
+  	/*
+  	*	Initializes the neighbor table with default values:
+  	*/
+  	void initNeighborTable()
+  	{
+  		int i;
+  		for(i = 0;i<AM_TABLESIZE;i++)
+  		{
+  			neighborTable[i].nodeId 		= AM_MAXNODEID;
+  			neighborTable[i].ackReceived 	= FALSE;
+			neighborTable[i].lastContact	= 0;
+		  	neighborTable[i].expired		= FALSE;
+   		}
+  	}
+  	
+  	
   	/*******************************************************************************************
   	*
   	*								Config
   	*
   	*******************************************************************************************/
-  	
-  	
   	
   	/*
   	*	Checks if Config is valid and reads from Config.
@@ -198,9 +214,8 @@ implementation
 	        	if (call Config.read(CONFIG_ADDR, &conf, sizeof(conf)) != SUCCESS)
 	        	{
 	          		dbg("Storage","Error: Config read failed\n");
-	          		
-	          		
-				}
+	          		call Leds.set(7);
+	   			}
 	      	}
 	      	else
 	      	{
@@ -208,19 +223,18 @@ implementation
 				dbg("Storage","Error: Storage not valid\n");
 				if (call Config.commit() == SUCCESS) 
 				{
-					 
 		  		}
 				else
 				{
 		  			dbg("Storage","Error: Config.commit failed\n");
-		  			 
-				}
+		  			call Leds.set(7);
+		  		}
 	      	}
 	    }
 	    else
 	    {
 	      // Handle failure
-	       
+	      call Leds.set(7);
 	    }
     }
     
@@ -235,9 +249,7 @@ implementation
     	{
       		memcpy(&conf, buf, len);
       		
-      		
-			
-			if(conf.flashVersion == FLASH_VERSION)
+      		if(conf.flashVersion == FLASH_VERSION)
 			{	
 				// update version 
 		      	conf.version = conf.version +1;
@@ -250,7 +262,8 @@ implementation
 	      		{
 	      			// start writing to log
 	        		conf.state = CONFIG_STATE_WRITING;
-	        		call Config.write(CONFIG_ADDR, &conf, sizeof(conf));        		
+	        		call Config.write(CONFIG_ADDR, &conf, sizeof(conf));  
+	        		call Leds.set(1);      		
 	        		
 	      		}
 	      		else if (conf.state == CONFIG_STATE_WRITING) 
@@ -262,6 +275,7 @@ implementation
 	      		else if (conf.state == CONFIG_STATE_READING) 
 	      		{
 	      			// reading from log
+	      			call LogRead.seek(call LogRead.currentOffset()); 
 	      			call ReadLogTimer.startOneShot(READLOG_INTERVAL);
 	      			call Leds.set(3);
 	      			
@@ -279,6 +293,7 @@ implementation
 		      	if (call LogWrite.erase() != SUCCESS) 
 		      	{
 					// Handle error.
+					call Leds.set(7);
 		      	}
 	      		call Leds.set(4);
 	      		
@@ -305,11 +320,13 @@ implementation
       		if (call Config.commit() != SUCCESS) 
       		{
         		// Handle failure
+        		call Leds.set(7);
       		}
     	}
     	else 
     	{
       		// Handle failure
+      		call Leds.set(7);
     	}
   	}
 	
@@ -322,6 +339,7 @@ implementation
     	if (err == SUCCESS) 
     	{
       		// Handle failure
+      		call Leds.set(7);
     	}
   	}
   	
@@ -332,8 +350,9 @@ implementation
   	*******************************************************************************************/
   	
   	
+  	
   	/*
-  	*	Enqueues reading and erases log if the logEntry isn't valid.
+  	*	Enqueues reading to send over radio/serial and erases log if the logEntry isn't valid.
   	*/
     event void LogRead.readDone(void* buf, storage_len_t len, error_t err) 
     {	
@@ -421,192 +440,15 @@ implementation
   	}
     
   	/*
-  	*	Unfreezes log. 
+  	*	Makes log writable. 
   	*/
   	event void LogWrite.appendDone(void* buf, storage_len_t len, bool recordsLost, error_t err) 
   	{
     	storageBusy = FALSE;
+    	call Leds.led1Toggle();
   	}
   	
-  	
-  	
-  	
-  	
-  	
-  	
-  	
-  	
-  	async event void ActiveMessageAddress.changed() 
-  	{
-  	}
-  	
-  	task void sendQueueTask()
-  	{
-  		if(radioBusy){
-  			//dbg("TestSerialC","Queue: busy radio->return\n");
-  			return;
-  		}
-  		if(call RadioQueue.empty() == FALSE)
-  		{
-  			message_t *qMsg = call RadioQueue.dequeue();
-  			QueueInfo info = call RadioTypeQueue.dequeue();
-  			uint8_t type = info.type;
-  			int msgLen = 0;
-
-  			am_addr_t receiver = AM_BROADCAST_ADDR;
-  			
-  			//dbg("TestSerialC","Queue: enqueued element with type %d\n",type);
-  			  			
-  			switch(type)
-  			{
-				case AM_BEACONMSG:
-				{
-					BeaconMsg *sent = (BeaconMsg*)(call RadioPacket.getPayload(qMsg, sizeof (BeaconMsg))); // jump to starting pointer
-					msgLen = sizeof(BeaconMsg);
-					receiver = AM_BROADCAST_ADDR;
-					//dbg("TestSerialC","Queue: Start sending BeaconMsg\n");
-					memcpy(&sndRadioLast,sent,msgLen);
-					break;
-				}
-				case AM_SENSORMSG:
-				{
-					SensorMsg *sent = (SensorMsg*)(call RadioPacket.getPayload(qMsg, sizeof (SensorMsg))); // jump to starting pointer
-					msgLen = sizeof(SensorMsg);
-					
-					receiver = chosenParent;
-					
-					if((call PacketAcknowledgements.requestAck(qMsg)) == SUCCESS)
-					{
-						checkForAck = TRUE;
-					}
-					else
-					{
-						checkForAck = FALSE;
-					}
-					//dbg("TestSerialC","Queue: Start sending SensorMsg\n");
-					memcpy(&sndRadioLast,sent,msgLen);
-					break;
-				}
-				case AM_TABLEMSG:
-				{
-					TableMsg *sent = (TableMsg*)(call RadioPacket.getPayload(qMsg, sizeof (TableMsg))); // jump to starting pointer
-					msgLen = sizeof(TableMsg);
-					
-					receiver = chosenParent;
-
-					if((call PacketAcknowledgements.requestAck(qMsg)) == SUCCESS)
-					{
-						checkForAck = TRUE;
-					}
-					else
-					{
-						checkForAck = FALSE;
-					}
-					//dbg("TestSerialC","Queue: Start sending TableMsg from %d to %d\n",sent->sender,sent->receiver);
-					//dbg("TestSerialC","Queue: receiver: %d sndRadio-sender: %d\n",sent->receiver,sent->sender);
-					memcpy(&sndRadioLast,sent,msgLen);
-					break;
-				}
-				case AM_COMMANDMSG:
-				{
-					CommandMsg *sent = (CommandMsg*)(call RadioPacket.getPayload(qMsg, sizeof (CommandMsg))); // jump to starting pointer
-					msgLen = sizeof(CommandMsg);
-					//dbg("TestSerialC","Queue: Start sending CommandMsg\n");
-					//dbg("TestSerialC","Queue: receiver: %d sndRadio-sender: %d sndRadio-ack: %d\n",sent->receiver,sent->sender, sent->isAck);
-					memcpy(&sndRadioLast,sent,msgLen);
-					if(sent->isAck)
-						receiver = sent->receiver;
-					else
-						receiver = AM_BROADCAST_ADDR;
-					break;
-				}
-  			}
-  			if (call RadioSend.send[type](receiver, qMsg, msgLen) != SUCCESS) {
-  			 	dbg("TestSerialC","Error Sending");
-  			}
-  			else{
-  				radioBusy = TRUE;
-  			}
-  		}
-  		else
-  		{
-  			//dbg("TestSerialC","Queue: no element in the queue\n");
-  		}
-  	}
-  	
-  	task void serialSendQueueTask()
-	{
-		if(serialBusy){
-			//dbg("TestSerialC","Queue: busy radio->return\n");
-			return;
-		}
-		if(call SerialQueue.empty() == FALSE)
-		{
-			message_t *qMsg = call SerialQueue.dequeue();
-			uint8_t type = call SerialTypeQueue.dequeue();
-		
-			am_addr_t receiver = 99;
-			uint8_t msgLen = 0;
-			
-			//dbg("TestSerialC","Queue: enqueued element with type %d\n",type);
-			switch(type)
-			{
-				case AM_BEACONMSG:
-				{
-					BeaconMsg *sent = (BeaconMsg*)(call SerialPacket.getPayload(qMsg, sizeof (BeaconMsg))); // jump to starting pointer
-					msgLen = sizeof(BeaconMsg);
-					memcpy(&sndSerialLast,sent,msgLen);
-					break;
-				}
-				case AM_SENSORMSG:
-				{
-					SensorMsg *sent = (SensorMsg*)(call SerialPacket.getPayload(qMsg, sizeof (SensorMsg))); // jump to starting pointer
-					msgLen = sizeof(SensorMsg);
-					memcpy(&sndSerialLast,sent,msgLen);
-					break;
-				}
-				case AM_TABLEMSG:
-				{
-					TableMsg *sent = (TableMsg*)(call SerialPacket.getPayload(qMsg, sizeof (TableMsg))); // jump to starting pointer
-					msgLen = sizeof(TableMsg);
-					memcpy(&sndRadioLast,sent,msgLen);
-					break;
-				}
-				case AM_COMMANDMSG:
-				{
-					CommandMsg *sent = (CommandMsg*)(call SerialPacket.getPayload(qMsg, sizeof (CommandMsg))); // jump to starting pointer
-					msgLen = sizeof(CommandMsg);
-					memcpy(&sndSerialLast,sent,msgLen);
-				}
-			}
-			if (call SerialSend.send[type](receiver, qMsg, msgLen) != SUCCESS) {
-				dbg("TestSerialC","Error Sending");
-			}
-			else{
-				serialBusy = TRUE;
-			}
-		}
-		else
-		{
-			//dbg("TestSerialC","Queue: no element in the queue\n");
-		}
-	}
-  	
-  	/*
-  	*	initializes the neighbor table with default values:
-  	*	
-  	*/
-  	void initNeighborTable()
-  	{
-  		int i;
-  		for(i = 0;i<AM_TABLESIZE;i++)
-  		{
-  			neighborTable[i].nodeId 		= AM_MAXNODEID;
-  			neighborTable[i].ackReceived 	= FALSE;
-			neighborTable[i].lastContact	= 0;
-		  	neighborTable[i].expired		= FALSE;
-   		}
-  	}
+   	
   	
   	/*******************************************************************************
   	*
@@ -658,7 +500,9 @@ implementation
     */ 
     event void TableTimer.fired()
     {	
-    	enqTable(); 
+    	enqTable();
+    	//printf("+++++ Hallo +++++++");
+    	//printfflush();
     }
     
     /* At each sample period:
@@ -790,7 +634,7 @@ implementation
 	  					curEntry->parentMote = UNDEFINED;
   						curEntry->childMote = FALSE;
   						curEntry->hops = UNDEFINED;
-  						curEntry->avgRSSI = 0;
+  						curEntry->avgLqi = 0;
 	  				}
 	  				else
 	  				{
@@ -818,22 +662,11 @@ implementation
   	}
   	
   	
-	// event which gets fired after the radio control is initialized
-  	event void RadioControl.startDone(error_t error) {
-    	if (error == SUCCESS) {
-    		//dbg("TestSerialC","start done\n");
-    	}
-  	}
-	
-	// event which gets fired after the serial control is initialized
-  	event void SerialControl.startDone(error_t error) {
-    	if (error == SUCCESS) {
-    		//dbg("TestSerialC","start done\n");
-    	}
-  	}
-
-  	event void SerialControl.stopDone(error_t error) {}
-  	event void RadioControl.stopDone(error_t error) {}
+	/*******************************************************************************
+  	*
+  	*							RadioReceive
+  	*
+  	*******************************************************************************/
   
   	/*
   	*	This function receives messages received over the radio
@@ -849,18 +682,19 @@ implementation
   			int16_t freeSlot = -1;
   			uint16_t i;
   			bool found = FALSE;
-  			uint16_t newAvgRSSI; 
+  			uint16_t newAvgLqi; 
   			
   			msgReceived = (BeaconMsg*)payload;
   			
-  			//calculate avgRSSI
-  			if(msgReceived->hops != UNDEFINED)
+  			//calculate avgLqi
+  			if(msgReceived->parent != UNDEFINED)
   			{
-  				newAvgRSSI = (((msgReceived->avgRSSI) * (msgReceived->hops)) + GETRSSI) / (msgReceived->hops + 1) ;
+  				newAvgLqi = (((msgReceived->avgLqi) * (msgReceived->hops)) + GETRSSI) / (msgReceived->hops + 1) ;
+  				
   			}
   			else
   			{
-  				newAvgRSSI = 0;
+  				newAvgLqi = 0;
   			}
   			
   			// when received a beacon add an entry to the neighbour table and ack
@@ -893,7 +727,7 @@ implementation
   							curEntry->childMote = FALSE;
   						}
   						curEntry->hops = msgReceived->hops;
-  						curEntry->avgRSSI = msgReceived->avgRSSI;
+  						curEntry->avgLqi = msgReceived->avgLqi;
   						
   						//dbg("TestSerialC","curEntry->nodeID: %d found entry for node: %d in neighbor table - update time\n",curEntry->nodeId,msgReceived->sender);
   					}
@@ -912,7 +746,7 @@ implementation
 			  					{	
 			  						dbg("Routing", "######### Connection to mote %d lost!\n", curEntry->nodeId);
 			  						localHops = UNDEFINED; 	// lower is better
-			 						localAvgRSSI = 0;	    // higher is better
+			 						localAvgLqi = 0;	    // higher is better
 			 						chosenParent = UNDEFINED; 	// UNDEFINED = no parent 
 			 						localVersion = call Random.rand16();
 			 						if(localVersion == UNDEFINED) localVersion--;
@@ -924,7 +758,7 @@ implementation
   								curEntry->parentMote = UNDEFINED;
 		  						curEntry->childMote = FALSE;
 		  						curEntry->hops = UNDEFINED;
-		  						curEntry->avgRSSI = 0;
+		  						curEntry->avgLqi = 0;
   							}
   						}
   					}
@@ -951,7 +785,7 @@ implementation
   						neighborTable[freeSlot].childMote = FALSE;
   					}
   					neighborTable[freeSlot].hops = msgReceived->hops;
-  					neighborTable[freeSlot].avgRSSI = msgReceived->avgRSSI;
+  					neighborTable[freeSlot].avgLqi = msgReceived->avgLqi;
   				}
   			}
   			
@@ -960,7 +794,6 @@ implementation
   			//									choose parent
   			//
   			//****************************************************************************************
-  			
   			
   			//always update route if msg from parent
   			if(msgReceived->sender == chosenParent)
@@ -971,30 +804,31 @@ implementation
   				{
   					chosenParent = UNDEFINED;
   					localVersion = msgReceived->version;
-  					localAvgRSSI = 0;
+  					localAvgLqi = 0;
   					localHops = UNDEFINED;
   				
   					// broadcast new info	
-  					//enqBeacon();
+  					enqBeacon();
   				}
   				else
   				{
 	  				localVersion = msgReceived->version;
-	  				localAvgRSSI = newAvgRSSI;
+	  				localAvgLqi = newAvgLqi;
 	  				localHops 	 = msgReceived->hops + 1;
 	  			}  				
   			}
+  			
   			//update route if necessary
   			if((msgReceived->parent != TOS_NODE_ID) && (msgReceived->parent != UNDEFINED)) //&&  // msg not from child, avoids loops
   			{
   				if(  (msgReceived->hops + 1 < localHops) // better hopCount
-  				|| ((msgReceived->hops+1 == localHops) && (newAvgRSSI > localAvgRSSI)) )	//same hopCount but better RSSI?
+  				|| ((msgReceived->hops+1 == localHops) && (newAvgLqi > localAvgLqi)) )	//same hopCount but better RSSI?
   				{
   					dbg("Routing","update routing information: msgReceived->sender=%d,msgReceived->parent=%d, msgReceived->version=%d, localVersion=%d , hopsMsg=%d, localhops=%d\n",msgReceived->sender,msgReceived->parent,msgReceived->version,localVersion, msgReceived->hops,localHops);
   					//new parent
   					chosenParent = msgReceived->sender;
   					localVersion = msgReceived->version;
-  					localAvgRSSI = newAvgRSSI;
+  					localAvgLqi = newAvgLqi;
   					localHops 	 = msgReceived->hops + 1;
   				
   					// broadcast new info
@@ -1003,6 +837,9 @@ implementation
   			}
   			return msg;
   		}
+  		
+  		
+  		
   		//dbg("TestSerialC","received msg on channel %d\n",id);
   		// got the right message to cast ?
   		if ((id == AM_COMMANDMSG) && (len == sizeof(CommandMsg)))
@@ -1049,6 +886,14 @@ implementation
     				{
     					conf.state = CONFIG_STATE_WRITING;
     					call Config.write(CONFIG_ADDR, &conf, sizeof(conf));
+    				}
+    				
+    				// start reading/sending of log
+    				if(msgReceived->reqSensor == 2)
+					{
+						conf.state = CONFIG_STATE_INIT;
+						call Config.write(CONFIG_ADDR, &conf, sizeof(conf));
+						call LogWrite.erase();
     				}
     				
     				// enable/disable led
@@ -1131,390 +976,8 @@ implementation
 			}
 		}
     	return msg;
-  	}
+  	}// end RadioReceive.receiver
   	
-  	/*
-  	*	Forwards a certain message on the Serial Port -  applies only to Node 0
-  	*/
-  	void serialSendTable(TableMsg* msg)
-  	{
-		int i;
-		message_t *newMsg = call SerialMsgPool.get();
-		TableMsg* msgToSend;
-  		if(newMsg == NULL)
-  		{
-  			dbg("TestSerialC","Error: No free serial msg pointer in pool!\n");
-  			return;
-  		}
-		msgToSend = (TableMsg*)(call SerialPacket.getPayload(newMsg, sizeof (TableMsg)));
-		msgToSend->sender = msg->sender;
-		msgToSend->receiver = msg->receiver;
-		msgToSend->parent = msg->parent;
-		msgToSend->avgRSSI = msg->avgRSSI;
-		
-		for(i=0;i<AM_TABLESIZE;i++)
-		{
-			msgToSend->nodeId[i] = msg->nodeId[i];
-			msgToSend->lastContact[i] = msg->lastContact[i];
-			//dbg("TestSerialC","before sending over serial nodeId: %d lastContact: %d\n",msgToSend->nodeId[i],msgToSend->lastContact[i]);
-		}
-				
-		// forward message
-		if(call SerialQueue.enqueue(newMsg) == SUCCESS)
-		{
-			call SerialTypeQueue.enqueue(AM_TABLEMSG);
-			//dbg("TestSerialC","serial reflect\n");
-		}
-		else
-		{
-			call SerialMsgPool.put(newMsg);
-		}
-  	}
-  	
-  	/*
-  	*	sends an acknowledgement to the sender of the last received command
-  	*/
-  	void enqAck()
-  	{
-		CommandMsg* lastMsg = (CommandMsg*)&rcvRadio;
-		CommandMsg* msgToSend;
-		message_t *newMsg = call RadioMsgPool.get();
-		if(newMsg == NULL)
-		{
-			dbg("TestSerialC","Error: No free radio msg pointer in pool!\n");
-			return;
-		}
-		msgToSend = (CommandMsg*)(call RadioPacket.getPayload(newMsg, sizeof (CommandMsg)));
-	
-		msgToSend->sender = TOS_NODE_ID;
-		msgToSend->seqNum = lastMsg->seqNum;
-		msgToSend->ledNum = lastMsg->ledNum;
-		msgToSend->receiver = lastMsg->sender;
-		msgToSend->isAck = 1;	
-
-		//dbg("TestSerialC","send ack to: %d from %d\n",lastMsg->sender,TOS_NODE_ID);
-
-		if (call RadioQueue.enqueue(newMsg) != SUCCESS)
-		{
-			dbg("TestSerialC","couldnt enqueue msg\n");
-		}
-		else
-		{
-			QueueInfo info;
-			info.type = AM_COMMANDMSG;
-			call RadioTypeQueue.enqueue(info);
-		}
-  	}
-  	
-	/*
-	*	Sends the received message from pc directly back to the pc (used as a message received indication)
-	*/
-  	void serialReflect() 
-  	{	
-		CommandMsg* msgReceived = (CommandMsg*)&rcvSerial;
-		message_t *newMsg = call SerialMsgPool.get();
-		CommandMsg* msgToSend;
-  		if(newMsg == NULL)
-  		{
-  			dbg("TestSerialC","Error: No free serial msg pointer in pool!\n");
-  			return;
-  		}
-		
-		msgToSend = (CommandMsg*)(call SerialPacket.getPayload(newMsg, sizeof (CommandMsg)));
-		msgToSend->sender 	= TOS_NODE_ID;
-		msgToSend->seqNum 	= msgReceived->seqNum;
-		msgToSend->ledNum 	= msgReceived->ledNum;
-		msgToSend->receiver = msgReceived->sender;
-		msgToSend->isAck 	= TRUE;
-	
-		// forward message
-		if(call SerialQueue.enqueue(newMsg) == SUCCESS)
-		{
-			call SerialTypeQueue.enqueue(AM_COMMANDMSG);
-			//dbg("TestSerialC","serial reflect\n");
-		}
-  	}
-  	
-  	/*
-  	*	Event which is fired after a transmit of a message over the serial channel
-  	*/
-  	event void SerialSend.sendDone[am_id_t id](message_t* msg, error_t error)
-  	{
-	    if (error == SUCCESS)
-	    {
-	  		// nice
-	    }
-	    serialBusy = FALSE;
-  		//dbg("TestSerialC", "error on message pointer\n");
-  		call SerialMsgPool.put(msg);
-  		post serialSendQueueTask();
-  	}
-  	
-  	/*
-  	*	Event which is fired when a certain message was received over the serial channel
-  	*	reflects the received message to the gui application indication successful reception
-  	*	and forwads the received command over radio
-  	*/
-  	event message_t *SerialReceive.receive[am_id_t id](message_t *msg, void *payload, uint8_t len)
-  	{  	
-  		dbg("TestSerialC","received message on serial channel\n");	
-  		// got the right message to cast ?
-  		if (len == sizeof(CommandMsg))
-  		{
-    		CommandMsg *msgReceived;
-  			memcpy(&rcvSerial,payload,len);
-    		msgReceived = (CommandMsg*)&rcvSerial;
-    		    		
-    		// check sequence number to avoid sending of duplicates
-    		if(msgReceived->seqNum > localSeqNumberCommand)
-    		{
-    			localSeqNumberCommand=msgReceived->seqNum;
-    			
-    			if(msgReceived->receiver == TOS_NODE_ID)
-    			{
-    				
-    				
-	    			//dbg("TestSerialC","Finished Node %d: received message on RadioChannel seqNum: %d\n",TOS_NODE_ID,msgReceived->seqNum);
-	    			localSeqNumberCommand = msgReceived->seqNum;
-	    			// start reading/sending of log
-    				if(msgReceived->reqSensor == 1)
-					{
-						conf.state = CONFIG_STATE_READING;
-						call Config.write(CONFIG_ADDR, &conf, sizeof(conf));
-						call ReadLogTimer.startOneShot(READLOG_INTERVAL);
-    				}
-    				// stop reading/sending of log
-    				if(msgReceived->reqSensor == 0)
-    				{
-    					conf.state = CONFIG_STATE_WRITING;
-    					call Config.write(CONFIG_ADDR, &conf, sizeof(conf));
-    				}
-    				
-    				// enable/disable led
-    				call Leds.set(msgReceived->ledNum);
-    				
-    				
-	    			//send a CommandMsg over the serial Channel
-    				serialReflect();
-    				post serialSendQueueTask();
-    			}
-    			else
-    			{
-    				message_t *newMsg = call RadioMsgPool.get();
-    				if(newMsg != NULL)
-    				{
-						// inject the packet into the sensornet		
-						CommandMsg* msgToSend = (CommandMsg*)(call RadioPacket.getPayload(newMsg, sizeof (CommandMsg)));
-						
-						msgToSend->sender 		= TOS_NODE_ID;
-						msgToSend->seqNum 		= msgReceived->seqNum;
-						msgToSend->ledNum 		= msgReceived->ledNum;
-						msgToSend->receiver 	= msgReceived->receiver;
-						msgToSend->reqSensor   	= msgReceived->reqSensor;
-						msgToSend->isAck 		= 0; 
-						
-						// enqueue message
-						if(call RadioQueue.enqueue(newMsg) == SUCCESS)
-						{
-							QueueInfo info;
-							info.type = AM_COMMANDMSG;
-							call RadioTypeQueue.enqueue(info);
-							post sendQueueTask();
-						}
-						serialReflect();
-						post serialSendQueueTask();
-    				}
-    				else{
-    					dbg("TestSerialC","Error: No free radio msg pointer in pool!\n");
-    				}
-				}
-    		}
-  		}	  		
-  		return msg;
-  	}
-  	
-  	/*
-  	*	Sends a CommandMsg over Radio
-  	*
-  	*	@param CommandMsg to send
-  	*/
-  	void radioSend(CommandMsg *receivedMsgToSend)
-  	{
-		// is radio unused?
-  		message_t *newMsg = call RadioMsgPool.get();
-  		CommandMsg* msgToSend;
-  		if(newMsg == NULL)
-  		{
-  			dbg("TestSerialC","Error: No free radio msg pointer in pool!\n");
-  	    	return;
-  		}
-		
-		msgToSend = (CommandMsg*)(call RadioPacket.getPayload(newMsg, sizeof (CommandMsg)));
-		msgToSend->sender 	= TOS_NODE_ID;
-		msgToSend->seqNum 	= receivedMsgToSend->seqNum;
-		msgToSend->ledNum 	= receivedMsgToSend->ledNum;
-		msgToSend->receiver = receivedMsgToSend->receiver;
-		msgToSend->reqSensor = receivedMsgToSend->reqSensor;
-		msgToSend->isAck 	= 0;
-	
-		//dbg("TestSerialC","got cmd forward msg from pool\n");
-		
-		if (call RadioQueue.enqueue(newMsg) != SUCCESS)
-		{
-			dbg("TestSerialC","couldnt enqueue Command msg\n");
-		}
-		else
-		{
-			QueueInfo info;
-			info.type = AM_COMMANDMSG;
-			//dbg("TestSerialC","enqueued new beacon msg\n");
-			call RadioTypeQueue.enqueue(info);
-			post sendQueueTask();
-		}
-  	}
-
- 	/*
-  	*	Sends a BeaconMsg over Radio via broadcast
-  	*/
-  	void enqBeacon()
-  	{
-  		message_t *newMsg = call RadioMsgPool.get();
-  		BeaconMsg* msgToSend;
-  		if(newMsg == NULL)
-		{
-			dbg("TestSerialC","Error: No free radio msg pointer in pool!\n");
-			return;
-		}
-  		
-		msgToSend = (BeaconMsg*)(call RadioPacket.getPayload(newMsg, sizeof (BeaconMsg)));
-		msgToSend->sender 	= TOS_NODE_ID;
-		msgToSend->hops 	= localHops;
-		msgToSend->avgRSSI 	= localAvgRSSI;
-		msgToSend->version 	= localVersion;
-		msgToSend->parent 	= chosenParent;
-		
-		//dbg("TestSerialC","got beacon msg from pool\n");
-		
-		if (call RadioQueue.enqueue(newMsg) != SUCCESS)
-		{
-			dbg("TestSerialC","couldnt enqueue beacon msg\n");
-		}
-		else
-		{
-			QueueInfo info;
-			info.type = AM_BEACONMSG;
-			//dbg("TestSerialC","enqueued new beacon msg\n");
-			call RadioTypeQueue.enqueue(info);
-			post sendQueueTask();
-		}
-  	}
-  	
-  	/*
-  	*	Task to forward table message to other nodes
-  	*/
-  	void enqTable()
-  	{
-		int i;
-		message_t *newMsg;
-		TableMsg* msgToSend;
-  		if(chosenParent == UNDEFINED)
-		{
-			dbg("TestSerialC","Error: No free radio msg pointer in pool!\n");
-			return;
-		}
-		newMsg = call RadioMsgPool.get();
-		if( newMsg == NULL )
-		{
-			return;
-		}
-		msgToSend = (TableMsg*)(call RadioPacket.getPayload(newMsg, sizeof (TableMsg)));
-		
-		if(msgToSend == NULL)
-		{
-			dbg("TestSerialC","null pointer on msg struct\n");
-			call RadioMsgPool.put(newMsg);
-			return;
-		}
-		msgToSend->sender 	= TOS_NODE_ID;
-		msgToSend->receiver = SERIAL_ADDR;
-		msgToSend->avgRSSI 	= localAvgRSSI;
-		msgToSend->parent 	= chosenParent;
-		
-		//dbg("TestSerialC","start sending tableMsg\n");
-		
-		for(i=0;i<AM_TABLESIZE;i++)
-		{
-			//dbg("TestSerialC","fill no %d: nodeId: %d lastCont: %d\n",i,neighborTable[i].nodeId,neighborTable[i].lastContact);
-			msgToSend->nodeId[i] = neighborTable[i].nodeId;
-			msgToSend->lastContact[i] = neighborTable[i].lastContact;
-		}
-		//dbg("TestSerialC","after filling tableMsg\n");
-		
-		if(TOS_NODE_ID == 0)
-		{
-			serialSendTable(msgToSend);
-			// important to free memory if its node 0, where no sending over radio is performed
-			if(call RadioMsgPool.put(newMsg) != SUCCESS)
-			{
-				dbg("TestSerialC","couldn't free table memory after serial send\n");
-			}
-			post serialSendQueueTask();
-		}
-		else
-		{
-			if (call RadioQueue.enqueue(newMsg) != SUCCESS)
-			{
-				dbg("TestSerialC","couldnt enqueue table msg\n");
-			}
-			else
-			{
-				QueueInfo info;
-				info.type = AM_TABLEMSG;
-				//dbg("TestSerialC","enqueued new table msg\n");
-				call RadioTypeQueue.enqueue(info);
-				post sendQueueTask();
-			}
-		}
-  	}
-  	
-  	/*
-  	*	sends a certain TableMsg over the radio channel via broadcast
-  	*
-  	*	@param TableMsg to send over radio
-  	*/
-  	void forwardTable(TableMsg* msg, QueueInfo info)
-  	{
-		message_t* newMsg;
-		TableMsg* tblMsg;
-		
-  		if(chosenParent == UNDEFINED)
-		{
-			dbg("Routing","no parent - do not send tableMsg\n");
-			return;
-		}
-		
-		newMsg = call RadioMsgPool.get();
-  		if(newMsg == NULL)
-		{
-			dbg("TestSerialC","Error: No free radio msg pointer in pool!\n");
-			return;
-		}
-
-  		tblMsg = call RadioPacket.getPayload(newMsg, sizeof (TableMsg));
-		memcpy(tblMsg,msg,sizeof(TableMsg));
-		//dbg("TestSerialC","enqueue forwarded table message from pool\n");
-
-		if (call RadioQueue.enqueue(newMsg) != SUCCESS)
-		{
-			dbg("TestSerialC","couldnt enqueue forwarded table msg\n");
-		}
-		else{
-			info.type = AM_TABLEMSG;
-			call RadioTypeQueue.enqueue(info);
-			post sendQueueTask();
-		}
-	
-  	}
   	
   	/*
   	*	Event which gets fired after successful/failed transmission of a message over radio
@@ -1592,65 +1055,661 @@ implementation
 			dbg("Pool","could't free element in radioPool\n");
 		}
 		post sendQueueTask();
+  	} // end RadioSend.sendDone
+  	
+  	
+  	
+  	
+  	
+  	
+  	
+  	  	
+  	/*
+  	*	Sends a CommandMsg over Radio
+  	*
+  	*	@param CommandMsg to send
+  	*/
+  	void radioSend(CommandMsg *receivedMsgToSend)
+  	{
+		// is radio unused?
+  		message_t *newMsg = call RadioMsgPool.get();
+  		CommandMsg* msgToSend;
+  		if(newMsg == NULL)
+  		{
+  			dbg("TestSerialC","Error: No free radio msg pointer in pool!\n");
+  	    	return;
+  		}
+		
+		msgToSend = (CommandMsg*)(call RadioPacket.getPayload(newMsg, sizeof (CommandMsg)));
+		msgToSend->sender 	= TOS_NODE_ID;
+		msgToSend->seqNum 	= receivedMsgToSend->seqNum;
+		msgToSend->ledNum 	= receivedMsgToSend->ledNum;
+		msgToSend->receiver = receivedMsgToSend->receiver;
+		msgToSend->reqSensor = receivedMsgToSend->reqSensor;
+		msgToSend->isAck 	= 0;
+	
+		//dbg("TestSerialC","got cmd forward msg from pool\n");
+		
+		if (call RadioQueue.enqueue(newMsg) != SUCCESS)
+		{
+			dbg("TestSerialC","couldnt enqueue Command msg\n");
+		}
+		else
+		{
+			QueueInfo info;
+			info.type = AM_COMMANDMSG;
+			//dbg("TestSerialC","enqueued new beacon msg\n");
+			call RadioTypeQueue.enqueue(info);
+			post sendQueueTask();
+		}
   	}
+  	
+  	/*
+  	*	sends a certain TableMsg over the radio channel via broadcast
+  	*
+  	*	@param TableMsg to send over radio
+  	*/
+  	void forwardTable(TableMsg* msg, QueueInfo info)
+  	{
+		message_t* newMsg;
+		TableMsg* tblMsg;
+		
+  		if(chosenParent == UNDEFINED)
+		{
+			dbg("Routing","no parent - do not send tableMsg\n");
+			return;
+		}
+		
+		newMsg = call RadioMsgPool.get();
+  		if(newMsg == NULL)
+		{
+			dbg("TestSerialC","Error: No free radio msg pointer in pool!\n");
+			return;
+		}
+
+  		tblMsg = call RadioPacket.getPayload(newMsg, sizeof (TableMsg));
+		memcpy(tblMsg,msg,sizeof(TableMsg));
+		//dbg("TestSerialC","enqueue forwarded table message from pool\n");
+
+		if (call RadioQueue.enqueue(newMsg) != SUCCESS)
+		{
+			dbg("TestSerialC","couldnt enqueue forwarded table msg\n");
+		}
+		else{
+			info.type = AM_TABLEMSG;
+			call RadioTypeQueue.enqueue(info);
+			post sendQueueTask();
+		}
+	
+  	}
+  	
+  	/*
+  	*	Sends a SensorMsg over radio.
+  	*	@param receivedMsgToSend pointer to received message
+  	*/
+  	void radioSendSensorMsg(SensorMsg* msg, QueueInfo info)
+  	{	
+  		SensorMsg* sensorMsg;
+  		message_t *newMsg;
+  		if(chosenParent == UNDEFINED)
+		{
+  			dbg("Routing","wont forward sensor msg -> no parent node\n");
+  			return;
+  		}
+		
+		newMsg = call RadioMsgPool.get();
+  		if(newMsg == NULL)
+  		{
+  			dbg("TestSerialC","Error: No free radio msg pointer in pool!\n");
+  			return;
+  		}
+  		sensorMsg = call RadioPacket.getPayload(newMsg, sizeof (SensorMsg));
+		memcpy(sensorMsg,msg,sizeof(SensorMsg));
+		
+		dbg("TestSerialCSensor","radio send sensor start\n");
+	
+		//dbg("TestSerialCSensor","got sensor msg from pool\n");
+		// forward or send message
+		if (call RadioQueue.enqueue(newMsg) != SUCCESS)
+		{
+			dbg("TestSerialC","couldnt enqueue forwarded table msg\n");
+			call RadioMsgPool.put(newMsg);
+		}
+		else{
+			//QueueInfo info;
+			info.type = AM_SENSORMSG;
+			call RadioTypeQueue.enqueue(info);
+			post sendQueueTask();
+		}
+  	}
+  	
+  	
+  	
+  	
   	
   	/*******************************************************************************
   	*
-  	*				Sensors: init, activate, read and SensorMsg forwarding
+  	*							Serial
+  	*
+  	*******************************************************************************/
+  	
+  	/*
+  	*	Forwards a certain message on the Serial Port -  applies only to Node 0
+  	*/
+  	void serialSendTable(TableMsg* msg)
+  	{
+		int i;
+		message_t *newMsg = call SerialMsgPool.get();
+		TableMsg* msgToSend;
+  		if(newMsg == NULL)
+  		{
+  			dbg("TestSerialC","Error: No free serial msg pointer in pool!\n");
+  			return;
+  		}
+		msgToSend = (TableMsg*)(call SerialPacket.getPayload(newMsg, sizeof (TableMsg)));
+		msgToSend->sender = msg->sender;
+		msgToSend->receiver = msg->receiver;
+		msgToSend->parent = msg->parent;
+		msgToSend->avgLqi = msg->avgLqi;
+		
+		for(i=0;i<AM_TABLESIZE;i++)
+		{
+			msgToSend->nodeId[i] = msg->nodeId[i];
+			msgToSend->lastContact[i] = msg->lastContact[i];
+			//dbg("TestSerialC","before sending over serial nodeId: %d lastContact: %d\n",msgToSend->nodeId[i],msgToSend->lastContact[i]);
+		}
+				
+		// forward message
+		if(call SerialQueue.enqueue(newMsg) == SUCCESS)
+		{
+			call SerialTypeQueue.enqueue(AM_TABLEMSG);
+			//dbg("TestSerialC","serial reflect\n");
+		}
+		else
+		{
+			call SerialMsgPool.put(newMsg);
+		}
+  	}
+  	
+  	/*
+  	*	Sends a SensorMsg over serial.
+  	* 	@param inputMsg SensorMsg pointer to message which should be sent.
+  	*/
+  	void serialSendSensorMsg(SensorMsg *msg)
+  	{
+  		//dbg("TestSerialCSensor","send sensor data over serial\n");
+  		message_t *newMsg = call SerialMsgPool.get();
+  		SensorMsg* msgToSend;
+  		if(newMsg == NULL)
+  		{
+  			dbg("TestSerialC","Error: No free serial msg pointer in pool!\n");
+  			return;
+  		}
+  		
+		msgToSend = (SensorMsg*)(call SerialPacket.getPayload(newMsg, sizeof (SensorMsg)));
+		memcpy(msgToSend,msg,sizeof(SensorMsg));
+	
+		// forward or send message
+		if(call SerialQueue.enqueue(newMsg) == SUCCESS)
+		{
+			call SerialTypeQueue.enqueue(AM_SENSORMSG);
+			post serialSendQueueTask();
+		}
+		else
+		{
+			call SerialMsgPool.put(newMsg);
+		}
+  	}
+  	
+	/*
+	*	Sends the received message from pc directly back to the pc (used as a message received indication)
+	*/
+  	void serialReflect() 
+  	{	
+		CommandMsg* msgReceived = (CommandMsg*)&rcvSerial;
+		message_t *newMsg = call SerialMsgPool.get();
+		CommandMsg* msgToSend;
+  		if(newMsg == NULL)
+  		{
+  			dbg("TestSerialC","Error: No free serial msg pointer in pool!\n");
+  			return;
+  		}
+		
+		msgToSend = (CommandMsg*)(call SerialPacket.getPayload(newMsg, sizeof (CommandMsg)));
+		msgToSend->sender 	= TOS_NODE_ID;
+		msgToSend->seqNum 	= msgReceived->seqNum;
+		msgToSend->ledNum 	= msgReceived->ledNum;
+		msgToSend->receiver = msgReceived->sender;
+		msgToSend->isAck 	= TRUE;
+	
+		// forward message
+		if(call SerialQueue.enqueue(newMsg) == SUCCESS)
+		{
+			call SerialTypeQueue.enqueue(AM_COMMANDMSG);
+			//dbg("TestSerialC","serial reflect\n");
+		}
+  	}
+  	
+  	/*
+  	*	Event which is fired after a transmit of a message over the serial channel
+  	*/
+  	event void SerialSend.sendDone[am_id_t id](message_t* msg, error_t error)
+  	{
+	    if (error == SUCCESS)
+	    {
+	  		// nice
+	    }
+	    serialBusy = FALSE;
+  		//dbg("TestSerialC", "error on message pointer\n");
+  		call SerialMsgPool.put(msg);
+  		post serialSendQueueTask();
+  	}
+  	
+  	
+  	
+  	/*
+  	*	Event which is fired when a certain message was received over the serial channel
+  	*	reflects the received message to the gui application indication successful reception
+  	*	and forwads the received command over radio
+  	*/
+  	event message_t *SerialReceive.receive[am_id_t id](message_t *msg, void *payload, uint8_t len)
+  	{  	
+  		dbg("TestSerialC","received message on serial channel\n");	
+  		// got the right message to cast ?
+  		if (len == sizeof(CommandMsg))
+  		{
+    		CommandMsg *msgReceived;
+  			memcpy(&rcvSerial,payload,len);
+    		msgReceived = (CommandMsg*)&rcvSerial;
+    		    		
+    		// check sequence number to avoid sending of duplicates
+    		if(msgReceived->seqNum > localSeqNumberCommand)
+    		{
+    			localSeqNumberCommand=msgReceived->seqNum;
+    			
+    			if(msgReceived->receiver == TOS_NODE_ID)
+    			{
+    				
+    				
+	    			//dbg("TestSerialC","Finished Node %d: received message on RadioChannel seqNum: %d\n",TOS_NODE_ID,msgReceived->seqNum);
+	    			localSeqNumberCommand = msgReceived->seqNum;
+	    			// start reading/sending of log
+    				if(msgReceived->reqSensor == 1)
+					{
+						conf.state = CONFIG_STATE_READING;
+						call Config.write(CONFIG_ADDR, &conf, sizeof(conf));
+						call ReadLogTimer.startOneShot(READLOG_INTERVAL);
+    				}
+    				// stop reading/sending of log
+    				if(msgReceived->reqSensor == 0)
+    				{
+    					conf.state = CONFIG_STATE_WRITING;
+    					call Config.write(CONFIG_ADDR, &conf, sizeof(conf));
+    				}
+    				// start reading/sending of log
+    				if(msgReceived->reqSensor == 2)
+					{
+						conf.state = CONFIG_STATE_INIT;
+						call Config.write(CONFIG_ADDR, &conf, sizeof(conf));
+						call LogWrite.erase();
+    				}
+
+    				// enable/disable led
+    				call Leds.set(msgReceived->ledNum);
+    				
+    				
+	    			//send a CommandMsg over the serial Channel
+    				serialReflect();
+    				post serialSendQueueTask();
+    			}
+    			else
+    			{
+    				message_t *newMsg = call RadioMsgPool.get();
+    				if(newMsg != NULL)
+    				{
+						// inject the packet into the sensornet		
+						CommandMsg* msgToSend = (CommandMsg*)(call RadioPacket.getPayload(newMsg, sizeof (CommandMsg)));
+						
+						msgToSend->sender 		= TOS_NODE_ID;
+						msgToSend->seqNum 		= msgReceived->seqNum;
+						msgToSend->ledNum 		= msgReceived->ledNum;
+						msgToSend->receiver 	= msgReceived->receiver;
+						msgToSend->reqSensor   	= msgReceived->reqSensor;
+						msgToSend->isAck 		= 0; 
+						
+						// enqueue message
+						if(call RadioQueue.enqueue(newMsg) == SUCCESS)
+						{
+							QueueInfo info;
+							info.type = AM_COMMANDMSG;
+							call RadioTypeQueue.enqueue(info);
+							post sendQueueTask();
+						}
+						serialReflect();
+						post serialSendQueueTask();
+    				}
+    				else{
+    					dbg("TestSerialC","Error: No free radio msg pointer in pool!\n");
+    				}
+				}
+    		}
+  		}	  		
+  		return msg;
+  	}
+  	
+  	
+  	
+  	/*******************************************************************************
+  	*
+  	*						Queue: send serial/radio , enqueue
+  	*
+  	*******************************************************************************/
+  	/*
+  	*	Enqueues a message and sends it over radio.
+  	*/
+  	task void sendQueueTask()
+  	{
+  		if(radioBusy){
+  			//dbg("TestSerialC","Queue: busy radio->return\n");
+  			return;
+  		}
+  		if(call RadioQueue.empty() == FALSE)
+  		{
+  			message_t *qMsg = call RadioQueue.dequeue();
+  			QueueInfo info = call RadioTypeQueue.dequeue();
+  			uint8_t type = info.type;
+  			int msgLen = 0;
+
+  			am_addr_t receiver = AM_BROADCAST_ADDR;
+  			
+  			//dbg("TestSerialC","Queue: enqueued element with type %d\n",type);
+  			  			
+  			switch(type)
+  			{
+				case AM_BEACONMSG:
+				{
+					BeaconMsg *sent = (BeaconMsg*)(call RadioPacket.getPayload(qMsg, sizeof (BeaconMsg))); // jump to starting pointer
+					msgLen = sizeof(BeaconMsg);
+					receiver = AM_BROADCAST_ADDR;
+					//dbg("TestSerialC","Queue: Start sending BeaconMsg\n");
+					memcpy(&sndRadioLast,sent,msgLen);
+					break;
+				}
+				case AM_SENSORMSG:
+				{
+					SensorMsg *sent = (SensorMsg*)(call RadioPacket.getPayload(qMsg, sizeof (SensorMsg))); // jump to starting pointer
+					msgLen = sizeof(SensorMsg);
+					
+					receiver = chosenParent;
+					
+					if((call PacketAcknowledgements.requestAck(qMsg)) == SUCCESS)
+					{
+						checkForAck = TRUE;
+					}
+					else
+					{
+						checkForAck = FALSE;
+					}
+					//dbg("TestSerialC","Queue: Start sending SensorMsg\n");
+					memcpy(&sndRadioLast,sent,msgLen);
+					break;
+				}
+				case AM_TABLEMSG:
+				{
+					TableMsg *sent = (TableMsg*)(call RadioPacket.getPayload(qMsg, sizeof (TableMsg))); // jump to starting pointer
+					msgLen = sizeof(TableMsg);
+					
+					receiver = chosenParent;
+
+					if((call PacketAcknowledgements.requestAck(qMsg)) == SUCCESS)
+					{
+						checkForAck = TRUE;
+					}
+					else
+					{
+						checkForAck = FALSE;
+					}
+					//dbg("TestSerialC","Queue: Start sending TableMsg from %d to %d\n",sent->sender,sent->receiver);
+					//dbg("TestSerialC","Queue: receiver: %d sndRadio-sender: %d\n",sent->receiver,sent->sender);
+					memcpy(&sndRadioLast,sent,msgLen);
+					break;
+				}
+				case AM_COMMANDMSG:
+				{
+					CommandMsg *sent = (CommandMsg*)(call RadioPacket.getPayload(qMsg, sizeof (CommandMsg))); // jump to starting pointer
+					msgLen = sizeof(CommandMsg);
+					//dbg("TestSerialC","Queue: Start sending CommandMsg\n");
+					//dbg("TestSerialC","Queue: receiver: %d sndRadio-sender: %d sndRadio-ack: %d\n",sent->receiver,sent->sender, sent->isAck);
+					memcpy(&sndRadioLast,sent,msgLen);
+					if(sent->isAck)
+						receiver = sent->receiver;
+					else
+						receiver = AM_BROADCAST_ADDR;
+					break;
+				}
+  			}
+  			if (call RadioSend.send[type](receiver, qMsg, msgLen) != SUCCESS) {
+  			 	dbg("TestSerialC","Error Sending");
+  			}
+  			else{
+  				radioBusy = TRUE;
+  			}
+  		}
+  		else
+  		{
+  			//dbg("TestSerialC","Queue: no element in the queue\n");
+  		}
+  	}
+  	
+  	/*
+  	*	Enqueues a message and sends it over serial.
+  	*/
+  	task void serialSendQueueTask()
+	{
+		if(serialBusy){
+			//dbg("TestSerialC","Queue: busy radio->return\n");
+			return;
+		}
+		if(call SerialQueue.empty() == FALSE)
+		{
+			message_t *qMsg = call SerialQueue.dequeue();
+			uint8_t type = call SerialTypeQueue.dequeue();
+		
+			am_addr_t receiver = 99;
+			uint8_t msgLen = 0;
+			
+			//dbg("TestSerialC","Queue: enqueued element with type %d\n",type);
+			switch(type)
+			{
+				case AM_BEACONMSG:
+				{
+					BeaconMsg *sent = (BeaconMsg*)(call SerialPacket.getPayload(qMsg, sizeof (BeaconMsg))); // jump to starting pointer
+					msgLen = sizeof(BeaconMsg);
+					memcpy(&sndSerialLast,sent,msgLen);
+					break;
+				}
+				case AM_SENSORMSG:
+				{
+					SensorMsg *sent = (SensorMsg*)(call SerialPacket.getPayload(qMsg, sizeof (SensorMsg))); // jump to starting pointer
+					msgLen = sizeof(SensorMsg);
+					memcpy(&sndSerialLast,sent,msgLen);
+					break;
+				}
+				case AM_TABLEMSG:
+				{
+					TableMsg *sent = (TableMsg*)(call SerialPacket.getPayload(qMsg, sizeof (TableMsg))); // jump to starting pointer
+					msgLen = sizeof(TableMsg);
+					memcpy(&sndRadioLast,sent,msgLen);
+					break;
+				}
+				case AM_COMMANDMSG:
+				{
+					CommandMsg *sent = (CommandMsg*)(call SerialPacket.getPayload(qMsg, sizeof (CommandMsg))); // jump to starting pointer
+					msgLen = sizeof(CommandMsg);
+					memcpy(&sndSerialLast,sent,msgLen);
+				}
+			}
+			if (call SerialSend.send[type](receiver, qMsg, msgLen) != SUCCESS) {
+				dbg("TestSerialC","Error Sending");
+			}
+			else{
+				serialBusy = TRUE;
+			}
+		}
+		else
+		{
+			//dbg("TestSerialC","Queue: no element in the queue\n");
+		}
+	}
+  	/*
+  	*	Sends an acknowledgement to the sender of the last received command
+  	*/
+  	void enqAck()
+  	{
+		CommandMsg* lastMsg = (CommandMsg*)&rcvRadio;
+		CommandMsg* msgToSend;
+		message_t *newMsg = call RadioMsgPool.get();
+		if(newMsg == NULL)
+		{
+			dbg("TestSerialC","Error: No free radio msg pointer in pool!\n");
+			return;
+		}
+		msgToSend = (CommandMsg*)(call RadioPacket.getPayload(newMsg, sizeof (CommandMsg)));
+	
+		msgToSend->sender = TOS_NODE_ID;
+		msgToSend->seqNum = lastMsg->seqNum;
+		msgToSend->ledNum = lastMsg->ledNum;
+		msgToSend->receiver = lastMsg->sender;
+		msgToSend->isAck = 1;	
+
+		//dbg("TestSerialC","send ack to: %d from %d\n",lastMsg->sender,TOS_NODE_ID);
+
+		if (call RadioQueue.enqueue(newMsg) != SUCCESS)
+		{
+			dbg("TestSerialC","couldnt enqueue msg\n");
+		}
+		else
+		{
+			QueueInfo info;
+			info.type = AM_COMMANDMSG;
+			call RadioTypeQueue.enqueue(info);
+		}
+  	}
+  	
+
+ 	/*
+  	*	Sends a BeaconMsg over Radio via broadcast
+  	*/
+  	void enqBeacon()
+  	{
+  		message_t *newMsg = call RadioMsgPool.get();
+  		BeaconMsg* msgToSend;
+  		if(newMsg == NULL)
+		{
+			dbg("TestSerialC","Error: No free radio msg pointer in pool!\n");
+			return;
+		}
+  		
+		msgToSend = (BeaconMsg*)(call RadioPacket.getPayload(newMsg, sizeof (BeaconMsg)));
+		msgToSend->sender 	= TOS_NODE_ID;
+		msgToSend->hops 	= localHops;
+		msgToSend->avgLqi 	= localAvgLqi;
+		msgToSend->version 	= localVersion;
+		msgToSend->parent 	= chosenParent;
+		
+		//dbg("TestSerialC","got beacon msg from pool\n");
+		
+		if (call RadioQueue.enqueue(newMsg) != SUCCESS)
+		{
+			dbg("TestSerialC","couldnt enqueue beacon msg\n");
+		}
+		else
+		{
+			QueueInfo info;
+			info.type = AM_BEACONMSG;
+			//dbg("TestSerialC","enqueued new beacon msg\n");
+			call RadioTypeQueue.enqueue(info);
+			post sendQueueTask();
+		}
+  	}
+  	
+  	/*
+  	*	Task to forward table message to other nodes
+  	*/
+  	void enqTable()
+  	{
+		int i;
+		message_t *newMsg;
+		TableMsg* msgToSend;
+  		if(chosenParent == UNDEFINED)
+		{
+			dbg("TestSerialC","Error: No free radio msg pointer in pool!\n");
+			return;
+		}
+		newMsg = call RadioMsgPool.get();
+		if( newMsg == NULL )
+		{
+			return;
+		}
+		msgToSend = (TableMsg*)(call RadioPacket.getPayload(newMsg, sizeof (TableMsg)));
+		
+		if(msgToSend == NULL)
+		{
+			dbg("TestSerialC","null pointer on msg struct\n");
+			call RadioMsgPool.put(newMsg);
+			return;
+		}
+		msgToSend->sender 	= TOS_NODE_ID;
+		msgToSend->receiver = SERIAL_ADDR;
+		msgToSend->avgLqi 	= localAvgLqi;
+		msgToSend->parent 	= chosenParent;
+		
+		//dbg("TestSerialC","start sending tableMsg\n");
+		
+		for(i=0;i<AM_TABLESIZE;i++)
+		{
+			//dbg("TestSerialC","fill no %d: nodeId: %d lastCont: %d\n",i,neighborTable[i].nodeId,neighborTable[i].lastContact);
+			msgToSend->nodeId[i] = neighborTable[i].nodeId;
+			msgToSend->lastContact[i] = neighborTable[i].lastContact;
+		}
+		//dbg("TestSerialC","after filling tableMsg\n");
+		
+		if(TOS_NODE_ID == 0)
+		{
+			serialSendTable(msgToSend);
+			// important to free memory if its node 0, where no sending over radio is performed
+			if(call RadioMsgPool.put(newMsg) != SUCCESS)
+			{
+				dbg("TestSerialC","couldn't free table memory after serial send\n");
+			}
+			post serialSendQueueTask();
+		}
+		else
+		{
+			if (call RadioQueue.enqueue(newMsg) != SUCCESS)
+			{
+				dbg("TestSerialC","couldnt enqueue table msg\n");
+			}
+			else
+			{
+				QueueInfo info;
+				info.type = AM_TABLEMSG;
+				//dbg("TestSerialC","enqueued new table msg\n");
+				call RadioTypeQueue.enqueue(info);
+				post sendQueueTask();
+			}
+		}
+  	}
+  	
+  	
+  	
+  	/*******************************************************************************
+  	*
+  	*				Sensors: init and read 
   	*
   	********************************************************************************/
 
-
-	/*
-     * Activates sensors by parameter sensor and activates timer
-     * SensorHumidity = 1
-     * SensorTemperature = 2
-     * SensorLight = 3
-     * @param sensor activates sensor 1-3.
-     */
-     void activateSensor(uint8_t sensor)
-     {
-     	dbg("TestSerialCSensor","activate sensor %d\n",sensor);
-     	if(sensor == 1)
-     	{
-     		collectorHumidityMsg.sensor = 1;	
-     	}
-     	if(sensor == 2)
-     	{
-     		collectorTemperatureMsg.sensor = 2;	
-     	}
-     	if(sensor == 3)
-     	{
-     		collectorLightMsg.sensor = 3;	
-     	}
-     	
-     	startSensorTimer();	
-     }
-     
-     /*
-     * Deactivates sensors by parameter sensor.
-     * SensorHumidity = 1
-     * SensorTemperature = 2
-     * SensorLight = 3
-     * @param sensor deactivates sensor 1-3.
-     */
-     void deactivateSensor(uint8_t sensor)
-     {
-     	dbg("TestSerialCSensor","deactivate sensor %d\n",sensor);
-     	if(sensor == 1)
-     	{
-     		collectorHumidityMsg.sensor = 0;	
-     	}
-     	if(sensor == 2)
-     	{
-     		collectorTemperatureMsg.sensor = 0;	
-     	}
-     	if(sensor == 3)
-     	{
-     		collectorLightMsg.sensor = 0;	
-     	}	
-     }
-     
+ 
      /*
      * Inits all sensors messages and readingCounts.
      */
@@ -1762,74 +1821,56 @@ implementation
 	  	}
   	}
   	
+  	
+  	
+  	
+  	
+  	/*******************************************************************************
+  	*
+  	*								Not in use
+  	*
+  	********************************************************************************/
+  	 	
+  	
   	/*
-  	*	Sends a SensorMsg over serial.
-  	* 	@param inputMsg SensorMsg pointer to message which should be sent.
+  	*	Not in use.
   	*/
-  	void serialSendSensorMsg(SensorMsg *msg)
+  	async event void ActiveMessageAddress.changed() 
   	{
-  		//dbg("TestSerialCSensor","send sensor data over serial\n");
-  		message_t *newMsg = call SerialMsgPool.get();
-  		SensorMsg* msgToSend;
-  		if(newMsg == NULL)
-  		{
-  			dbg("TestSerialC","Error: No free serial msg pointer in pool!\n");
-  			return;
-  		}
-  		
-		msgToSend = (SensorMsg*)(call SerialPacket.getPayload(newMsg, sizeof (SensorMsg)));
-		memcpy(msgToSend,msg,sizeof(SensorMsg));
-	
-		// forward or send message
-		if(call SerialQueue.enqueue(newMsg) == SUCCESS)
-		{
-			call SerialTypeQueue.enqueue(AM_SENSORMSG);
-			post serialSendQueueTask();
-		}
-		else
-		{
-			call SerialMsgPool.put(newMsg);
-		}
   	}
   	
   	/*
-  	*	Sends a SensorMsg over radio.
-  	*	@param receivedMsgToSend pointer to received message
+  	*	Not in use.
   	*/
-  	void radioSendSensorMsg(SensorMsg* msg, QueueInfo info)
-  	{	
-  		SensorMsg* sensorMsg;
-  		message_t *newMsg;
-  		if(chosenParent == UNDEFINED)
-		{
-  			dbg("Routing","wont forward sensor msg -> no parent node\n");
-  			return;
-  		}
-		
-		newMsg = call RadioMsgPool.get();
-  		if(newMsg == NULL)
-  		{
-  			dbg("TestSerialC","Error: No free radio msg pointer in pool!\n");
-  			return;
-  		}
-  		sensorMsg = call RadioPacket.getPayload(newMsg, sizeof (SensorMsg));
-		memcpy(sensorMsg,msg,sizeof(SensorMsg));
-		
-		dbg("TestSerialCSensor","radio send sensor start\n");
+  	event void RadioControl.startDone(error_t error) 
+  	{
+    	if (error == SUCCESS) {
+    		//dbg("TestSerialC","start done\n");
+    	}
+  	}
 	
-		//dbg("TestSerialCSensor","got sensor msg from pool\n");
-		// forward or send message
-		if (call RadioQueue.enqueue(newMsg) != SUCCESS)
-		{
-			dbg("TestSerialC","couldnt enqueue forwarded table msg\n");
-			call RadioMsgPool.put(newMsg);
-		}
-		else{
-			//QueueInfo info;
-			info.type = AM_SENSORMSG;
-			call RadioTypeQueue.enqueue(info);
-			post sendQueueTask();
-		}
+	/*
+  	*	Not in use.
+  	*/
+  	event void SerialControl.startDone(error_t error) 
+  	{
+    	if (error == SUCCESS) {
+    		//dbg("TestSerialC","start done\n");
+    	}
+  	}
+	
+	/*
+  	*	Not in use.
+  	*/
+  	event void SerialControl.stopDone(error_t error)
+  	{
+  	}
+  	
+  	/*
+  	*	Not in use.
+  	*/
+  	event void RadioControl.stopDone(error_t error)
+  	{
   	}
   	
 } 
